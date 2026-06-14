@@ -27,6 +27,22 @@ const DEFAULT_MAX_TOOL_ROUNDS = 24;
 /** Per-request timeout for a model chat completion. */
 const COMPLETION_TIMEOUT_MS = 120_000;
 
+/**
+ * Default output cap. Terminal-bench tasks routinely require `write()` calls
+ * whose `content` argument is a full source file — 4096 tokens truncates
+ * mid-file for anything non-trivial, producing invalid tool-call JSON that
+ * silently fails the task. 8192 fits most single-file deliverables.
+ */
+const DEFAULT_MAX_TOKENS = 8192;
+
+/** How many times to retry a model request that fails with a transient error. */
+const MAX_RETRIES = 3;
+
+/** True for HTTP statuses that warrant a retry (rate-limit / server faults). */
+function isTransientStatus(status: number): boolean {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
 function extractSystemMessage(messages: Message[]): string | undefined {
   return messages.find(m => m.role === 'system')?.content as string | undefined;
 }
@@ -214,48 +230,84 @@ export class AgentCoordinator {
       model: this.config.model,
       messages,
       temperature: this.config.temperature ?? 0.7,
-      max_tokens: this.config.maxTokens ?? 4096,
+      max_tokens: this.config.maxTokens ?? DEFAULT_MAX_TOKENS,
       stream: false,
     };
     if (tools.length > 0) {
       body.tools = tools;
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), COMPLETION_TIMEOUT_MS);
-    try {
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.config.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => '');
-        throw new Error(`model API ${resp.status}: ${text.slice(0, 500)}`);
+    let data: any;
+    // Retry transient failures (429 / 5xx / abort-on-timeout) with
+    // exponential backoff. A single rate-limit hiccup must not fail an
+    // entire terminal-bench task — runs are long and spans are bursty.
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        // 1s, 2s, 4s.
+        const backoff = 1000 * Math.pow(2, attempt - 1);
+        await sleep(backoff);
       }
-      const data: any = await resp.json();
-      const choice = data.choices?.[0]?.message ?? {};
-      const content: string | null =
-        typeof choice.content === 'string' ? choice.content : null;
-      const toolCalls: CompletionResponse['toolCalls'] = (choice.tool_calls ?? []).map(
-        (tc: any) => ({
-          id: tc.id,
-          name: tc.function?.name,
-          arguments: safeParseArgs(tc.function?.arguments),
-        }),
-      );
-      return {
-        content,
-        toolCalls,
-        finishReason: data.choices?.[0]?.finish_reason ?? 'stop',
-      };
-    } finally {
-      clearTimeout(timer);
+      try {
+        // A fresh AbortController per attempt: reusing one after abort is a no-op.
+        const attemptController = new AbortController();
+        const attemptTimer = setTimeout(
+          () => attemptController.abort(),
+          COMPLETION_TIMEOUT_MS,
+        );
+        let resp: Response;
+        try {
+          resp = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${this.config.apiKey}`,
+            },
+            body: JSON.stringify(body),
+            signal: attemptController.signal,
+          });
+        } finally {
+          clearTimeout(attemptTimer);
+        }
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => '');
+          const err = new Error(`model API ${resp.status}: ${text.slice(0, 500)}`);
+          if (isTransientStatus(resp.status) && attempt < MAX_RETRIES - 1) {
+            lastError = err;
+            continue; // retry
+          }
+          throw err;
+        }
+        data = await resp.json();
+        lastError = null;
+        break; // success
+      } catch (err: any) {
+        // Network error or abort: retry on these too, since they are
+        // typically transient (connection reset, momentary timeout).
+        const aborted = err?.name === 'AbortError';
+        if (aborted || isNetworkError(err)) {
+          lastError = err instanceof Error ? err : new Error(String(err));
+          if (attempt < MAX_RETRIES - 1) continue;
+        }
+        throw err;
+      }
     }
+    if (lastError && data === undefined) throw lastError;
+    const choice = data.choices?.[0]?.message ?? {};
+    const content: string | null =
+      typeof choice.content === 'string' ? choice.content : null;
+    const toolCalls: CompletionResponse['toolCalls'] = (choice.tool_calls ?? []).map(
+      (tc: any) => ({
+        id: tc.id,
+        name: tc.function?.name,
+        arguments: safeParseArgs(tc.function?.arguments),
+      }),
+    );
+    return {
+      content,
+      toolCalls,
+      finishReason: data.choices?.[0]?.finish_reason ?? 'stop',
+    };
   }
 
   /** Legacy single-shot path (no tool execution). */
@@ -354,4 +406,24 @@ function safeParseArgs(raw: unknown): Record<string, unknown> {
   }
   if (raw && typeof raw === 'object') return raw as Record<string, unknown>;
   return {};
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** True for fetch failures caused by the network (not HTTP status). */
+function isNetworkError(err: any): boolean {
+  if (!err) return false;
+  const name = err.name ?? '';
+  const msg = String(err.message ?? err);
+  // TypeError is what fetch() throws on DNS/connection failures; ECONNRESET
+  // and friends surface in the message. We deliberately do NOT retry on
+  // programmer errors (bad URL, invalid body) — those throw synchronously
+  // before/around fetch and aren't transient.
+  return (
+    name === 'TypeError' ||
+    name === 'AbortError' ||
+    /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|network/i.test(msg)
+  );
 }

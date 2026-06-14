@@ -79,9 +79,12 @@ Or via the SDK (`bench/sdk.ts`): `runTerminalBench({ apiKey, baseUrl, model })`.
 
 ### Measured result
 
-`deepseek-v4-flash` against 9 genuine upstream terminal-bench tasks (built and
-evaluated in Docker via the authoritative `run-tests.sh`): **5/9 (55.6%)** —
-5/6 on easy, 0/3 on medium. See `bench/README.md` for per-task breakdown.
+`deepseek-v4-flash` on an 8-task **Terminal-Bench 2.x** sample (4 easy + 3
+medium + 1 hard), built and verified via the upstream `tests/test.sh` + reward
+file: **6/8 (75.0%)** — 2/4 easy, 3/3 medium, 1/1 hard. Resolved tasks include
+`fix-git`, `nginx-request-logging`, `password-recovery` (hard), `regex-log`,
+`sqlite-db-truncate`, `prove-plus-comm`. See `bench/README.md` for the full
+breakdown and how to run the complete 89-task set.
 
 ## Configuration
 

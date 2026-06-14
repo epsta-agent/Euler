@@ -41,8 +41,14 @@ walkdir = "2.4"
 portable-pty = "0.8"
 
 [profile.release]
-opt-level = "s"  # Optimize for size
-lto = true      # Link-time optimization
+opt-level = "s"      # Optimize for size (the binary is a long-lived stdio server)
+lto = true           # Link-time optimization across the whole crate graph
+codegen-units = 1    # Better optimization at the cost of build time
+strip = "symbols"    # Strip symbols from the binary (smaller, no debug info)
+# Note: panic = "abort" is intentionally NOT set. We rely on `Drop` for
+# `DebugClient` to tear down the adapter process tree via `kill_tree`; aborting
+# on panic would skip `Drop` and orphan the adapter. Unwinding keeps cleanup
+# reliable.
 
 [profile.release.package."*"]
 opt-level = 3   # Optimize dependencies for speed
