@@ -1,0 +1,21 @@
+[package]
+name = "pty-bridge"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+portable-pty.workspace = true
+
+# `wasm` is a build-time marker only: PTY operations are native and remain
+# compiled unconditionally. The feature is kept for workspace compatibility.
+wasm-bindgen = { workspace = true, optional = true }
+
+[features]
+default = []
+wasm = ["wasm-bindgen"]

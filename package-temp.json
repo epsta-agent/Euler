@@ -1,0 +1,6 @@
+{
+  "name": "test-sqlite",
+  "dependencies": {
+    "bun:sqlite": "^0.0.1"
+  }
+}

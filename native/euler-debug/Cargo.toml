@@ -1,0 +1,26 @@
+[package]
+name = "euler-debug"
+version.workspace = true
+edition.workspace = true
+description = "Rust-native DAP debugger bridge for the Euler agent. Speaks a simple line-delimited JSON RPC on stdio and drives real DAP adapters (debugpy, lldb-dap/codelldb, dlv, node) underneath."
+
+[lib]
+name = "euler_debug"
+path = "src/lib.rs"
+
+[[bin]]
+name = "euler-debug"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []

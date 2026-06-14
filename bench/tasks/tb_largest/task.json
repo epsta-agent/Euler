@@ -1,0 +1,8 @@
+{
+  "id": "tb_largest",
+  "problem_statement": "Write an executable script 'largest.sh' (shebang + chmod so ./largest.sh runs) that prints the single largest number found anywhere in the file 'nums.txt' (one number per line, some lines blank). Just the number, nothing else.",
+  "fail_to_pass": ["test \"$(./largest.sh)\" = \"9451\""],
+  "pass_to_pass": [],
+  "language": "shell",
+  "max_turns": 8
+}

@@ -1,0 +1,43 @@
+{
+  "name": "euler-agent",
+  "version": "0.1.0",
+  "description": "Euler AI Coding Agent - TypeScript agent with multi-provider LLM support",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "euler": "./dist/euler"
+  },
+  "scripts": {
+    "dev": "bun --watch src/cli.tsx",
+    "build": "bun build src/cli.tsx --outfile dist/cli.js --target bun",
+    "build:native": "./build-native.sh",
+    "start": "bun src/cli.tsx",
+    "resume": "bun src/cli.tsx --resume",
+    "select-model": "bun src/cli.tsx --select-model",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "benchmark": "bun src/native/benchmark.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
+    "@google/genai": "^1.40.0",
+    "@google/generative-ai": "^0.24.1",
+    "@mistralai/mistralai": "^2.2.5",
+    "chalk": "^5.6.2",
+    "glob": "^13.0.6",
+    "gray-matter": "^4.0.3",
+    "ignore": "^7.0.5",
+    "ink": "^4.4.1",
+    "minimatch": "^10.2.5",
+    "openai": "^6.26.0",
+    "react": "^18.2.0",
+    "react-devtools-core": "^7.0.1",
+    "typebox": "^1.1.24",
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0",
+    "@types/react": "^18.2.0",
+    "typescript": "^5.7.3"
+  }
+}

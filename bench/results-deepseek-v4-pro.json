@@ -1,0 +1,101 @@
+{
+  "generated_at": "2026-06-14T14:33:29.357Z",
+  "summary": {
+    "total": 7,
+    "resolved": 7,
+    "passRate": 100
+  },
+  "results": [
+    {
+      "id": "empty_check",
+      "resolved": true,
+      "fail_to_pass_results": [
+        {
+          "command": "python3 -m pytest test_strings.py -q",
+          "passed": true,
+          "output": "/Users/jason/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020\n  warnings.warn(\n....                                                                     [100%]\n4 passed in 0.00s\n"
+        }
+      ],
+      "pass_to_pass_results": [],
+      "turns_used": 6
+    },
+    {
+      "id": "list_index",
+      "resolved": true,
+      "fail_to_pass_results": [
+        {
+          "command": "python3 -m pytest test_listops.py -q",
+          "passed": true,
+          "output": "/Users/jason/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020\n  warnings.warn(\n....                                                                     [100%]\n4 passed in 0.00s\n"
+        }
+      ],
+      "pass_to_pass_results": [],
+      "turns_used": 6
+    },
+    {
+      "id": "off_by_one",
+      "resolved": true,
+      "fail_to_pass_results": [
+        {
+          "command": "python3 -m pytest test_calc.py -q",
+          "passed": true,
+          "output": "/Users/jason/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020\n  warnings.warn(\n.                                                                        [100%]\n1 passed in 0.00s\n"
+        }
+      ],
+      "pass_to_pass_results": [],
+      "turns_used": 7
+    },
+    {
+      "id": "string_reverse",
+      "resolved": true,
+      "fail_to_pass_results": [
+        {
+          "command": "python3 -m pytest test_strutils.py -q",
+          "passed": true,
+          "output": "/Users/jason/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020\n  warnings.warn(\n..                                                                       [100%]\n2 passed in 0.00s\n"
+        }
+      ],
+      "pass_to_pass_results": [],
+      "turns_used": 6
+    },
+    {
+      "id": "tb_largest",
+      "resolved": true,
+      "fail_to_pass_results": [
+        {
+          "command": "test \"$(./largest.sh)\" = \"9451\"",
+          "passed": true,
+          "output": ""
+        }
+      ],
+      "pass_to_pass_results": [],
+      "turns_used": 6
+    },
+    {
+      "id": "tb_wordcount",
+      "resolved": true,
+      "fail_to_pass_results": [
+        {
+          "command": "test \"$(./count.sh notes.txt)\" = \"3\"",
+          "passed": true,
+          "output": ""
+        }
+      ],
+      "pass_to_pass_results": [],
+      "turns_used": 6
+    },
+    {
+      "id": "terminal_ls",
+      "resolved": true,
+      "fail_to_pass_results": [
+        {
+          "command": "test \"$(./analyze.sh)\" = \"2\"",
+          "passed": true,
+          "output": ""
+        }
+      ],
+      "pass_to_pass_results": [],
+      "turns_used": 7
+    }
+  ]
+}

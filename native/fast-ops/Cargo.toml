@@ -1,0 +1,21 @@
+[package]
+name = "fast-ops"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = { workspace = true, optional = true }
+serde_json.workspace = true
+serde-wasm-bindgen = { version = "0.6", optional = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+anyhow.workspace = true
+walkdir.workspace = true
+ignore = "0.4"
+
+[features]
+default = ["wasm"]
+wasm = ["wasm-bindgen", "serde-wasm-bindgen"]

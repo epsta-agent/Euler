@@ -1,0 +1,27 @@
+[package]
+name = "clipboard-native"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+arboard = { version = "3", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+clipboard-win = "4"
+
+# WASM (web_sys) is intentionally not supported here: clipboard access requires
+# native platform APIs and the previous `wasm` feature referenced an undeclared
+# `web_sys` crate. The crate is native-only.
+[features]
+default = []

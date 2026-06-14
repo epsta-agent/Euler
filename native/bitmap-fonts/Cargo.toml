@@ -1,0 +1,18 @@
+[package]
+name = "bitmap-fonts"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = { workspace = true, optional = true }
+serde_json.workspace = true
+serde-wasm-bindgen = { version = "0.6", optional = true }
+thiserror.workspace = true
+anyhow.workspace = true
+
+[features]
+default = ["wasm"]
+wasm = ["wasm-bindgen", "serde-wasm-bindgen"]

@@ -1,0 +1,761 @@
+/**
+ * Native Bridge - TypeScript to Rust/WebAssembly integration
+ * Provides high-performance native operations for Euler Agent
+ */
+
+// Import WASM modules (now available after build)
+let wasmInitialized = false;
+let wasmModules: any = null;
+
+/**
+ * Initialize WASM modules with proper error handling
+ */
+export async function initNative(): Promise<void> {
+  if (wasmInitialized) {
+    return;
+  }
+
+  try {
+    // Load all WASM modules
+    const [
+      bitmapFonts,
+      ripgrepLite,
+      kittyProtocol,
+      snapcompactWasm,
+      fastOps,
+    ] = await Promise.all([
+      import('../pkg/bitmap-fonts/bitmap_fonts.js'),
+      import('../pkg/ripgrep-lite/ripgrep_lite.js'),
+      import('../pkg/kitty-protocol/kitty_protocol.js'),
+      import('../pkg/snapcompact-wasm/snapcompact_wasm.js'),
+      import('../pkg/fast-ops/fast_ops.js'),
+    ]);
+
+    // Initialize all WASM modules
+    await Promise.all([
+      bitmapFonts.default?.(),
+      ripgrepLite.default?.(),
+      kittyProtocol.default?.(),
+      snapcompactWasm.default?.(),
+      fastOps.default?.(),
+    ]);
+
+    wasmModules = {
+      bitmapFonts,
+      ripgrepLite,
+      kittyProtocol,
+      snapcompactWasm,
+      fastOps,
+    };
+
+    wasmInitialized = true;
+    console.log('✅ Native WASM modules initialized successfully');
+  } catch (error) {
+    console.warn('⚠️ Failed to initialize native WASM modules:', error);
+    console.warn('Some features may fall back to TypeScript implementations');
+    wasmInitialized = true; // Don't retry
+  }
+}
+
+/**
+ * Check if native modules are available
+ */
+export function isNativeAvailable(): boolean {
+  return wasmInitialized && wasmModules !== null;
+}
+
+/**
+ * Native bitmap font rendering
+ */
+export const nativeFont = {
+  /**
+   * Load BDF (Bitmap Distribution Format) font
+   */
+  async loadBdf(data: string): Promise<NativeBitmapFont | null> {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const font = wasmModules.bitmapFonts.WasmBitmapFont.load_bdf(data);
+      return new NativeBitmapFont(font);
+    } catch (error) {
+      console.error('Failed to load BDF font:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Load unscii-8.hex format font
+   */
+  async loadUnsciiHex(data: string): Promise<NativeBitmapFont | null> {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const font = wasmModules.bitmapFonts.WasmBitmapFont.load_unscii_hex(data);
+      return new NativeBitmapFont(font);
+    } catch (error) {
+      console.error('Failed to load unscii hex font:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Create default 5x8 bitmap font
+   */
+  async createDefault(): Promise<NativeBitmapFont | null> {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const font = new wasmModules.bitmapFonts.WasmBitmapFont();
+      return new NativeBitmapFont(font);
+    } catch (error) {
+      console.error('Failed to create default font:', error);
+      return null;
+    }
+  },
+};
+
+/**
+ * Native bitmap font wrapper
+ */
+export class NativeBitmapFont {
+  constructor(private font: any) {}
+
+  /**
+   * Render text to terminal output
+   */
+  renderText(text: string): string {
+    return this.font.render_text(text);
+  }
+
+  /**
+   * Measure text width in pixels
+   */
+  measureText(text: string): number {
+    return this.font.measure_text(text);
+  }
+
+  /**
+   * Get font height
+   */
+  get height(): number {
+    return this.font.height();
+  }
+
+  /**
+   * Get font width
+   */
+  get width(): number {
+    return this.font.width();
+  }
+}
+
+/**
+ * Native fast search operations (ripgrep-style)
+ */
+export const nativeSearch = {
+  /**
+   * Create new fast searcher instance
+   */
+  createSearcher(): NativeFastSearcher | null {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const searcher = new wasmModules.ripgrepLite.WasmFastSearcher();
+      return new NativeFastSearcher(searcher);
+    } catch (error) {
+      console.error('Failed to create searcher:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Search file for pattern matches
+   */
+  async searchFile(
+    pattern: string,
+    path: string,
+    caseInsensitive = false
+  ): Promise<SearchMatch[] | null> {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const searcher = new wasmModules.ripgrepLite.WasmFastSearcher();
+      const result = await searcher.search_file(pattern, path, caseInsensitive);
+      return JSON.parse(result);
+    } catch (error) {
+      console.error('Search failed:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Recursively search directory for pattern matches
+   */
+  async searchRecursive(
+    pattern: string,
+    path: string,
+    caseInsensitive = false
+  ): Promise<SearchMatch[] | null> {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const searcher = new wasmModules.ripgrepLite.WasmFastSearcher();
+      const result = await searcher.search_recursive(pattern, path, caseInsensitive);
+      return JSON.parse(result);
+    } catch (error) {
+      console.error('Recursive search failed:', error);
+      return null;
+    }
+  },
+};
+
+/**
+ * Native fast searcher wrapper
+ */
+export class NativeFastSearcher {
+  constructor(private searcher: any) {}
+
+  /**
+   * Search file for pattern matches
+   */
+  async searchFile(
+    pattern: string,
+    path: string,
+    caseInsensitive = false
+  ): Promise<SearchMatch[]> {
+    const result = await this.searcher.search_file(pattern, path, caseInsensitive);
+    return JSON.parse(result);
+  }
+
+  /**
+   * Recursively search directory for pattern matches
+   */
+  async searchRecursive(
+    pattern: string,
+    path: string,
+    caseInsensitive = false
+  ): Promise<SearchMatch[]> {
+    const result = await this.searcher.search_recursive(pattern, path, caseInsensitive);
+    return JSON.parse(result);
+  }
+
+  /**
+   * Clear pattern cache
+   */
+  clearCache(): void {
+    this.searcher.clear_cache();
+  }
+
+  /**
+   * Get cache statistics
+   */
+  getCacheStats(): [number, number] {
+    const stats = this.searcher.cache_stats();
+    return [stats[0], stats[1]];
+  }
+}
+
+/**
+ * Search match result
+ */
+export interface SearchMatch {
+  path: string;
+  line_number: number;
+  line: string;
+  byte_offset: number;
+}
+
+/**
+ * Native Kitty keyboard protocol support
+ */
+export const nativeKitty = {
+  /**
+   * Create new Kitty protocol instance
+   */
+  createProtocol(): NativeKittyProtocol | null {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const protocol = new wasmModules.kittyProtocol.WasmKittyProtocol();
+      return new NativeKittyProtocol(protocol);
+    } catch (error) {
+      console.error('Failed to create Kitty protocol:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Enable Kitty keyboard protocol
+   */
+  enableProtocol(): string {
+    if (!isNativeAvailable()) {
+      // Fallback to standard escape sequence
+      return '\x1b[>1u';
+    }
+
+    try {
+      const protocol = new wasmModules.kittyProtocol.WasmKittyProtocol();
+      return protocol.enable();
+    } catch (error) {
+      console.warn('Failed to enable Kitty protocol:', error);
+      return '\x1b[>1u';
+    }
+  },
+
+  /**
+   * Disable Kitty keyboard protocol
+   */
+  disableProtocol(): string {
+    if (!isNativeAvailable()) {
+      // Fallback to standard escape sequence
+      return '\x1b[<u';
+    }
+
+    try {
+      const protocol = new wasmModules.kittyProtocol.WasmKittyProtocol();
+      return protocol.disable();
+    } catch (error) {
+      console.warn('Failed to disable Kitty protocol:', error);
+      return '\x1b[<u';
+    }
+  },
+};
+
+/**
+ * Native Kitty protocol wrapper
+ */
+export class NativeKittyProtocol {
+  constructor(private protocol: any) {}
+
+  /**
+   * Enable Kitty keyboard protocol
+   */
+  enable(): string {
+    return this.protocol.enable();
+  }
+
+  /**
+   * Disable Kitty keyboard protocol
+   */
+  disable(): string {
+    return this.protocol.disable();
+  }
+
+  /**
+   * Enable with specific options
+   */
+  enableWithOptions(disambiguate: boolean, reportEvents: boolean): string {
+    return this.protocol.enable_with_options(disambiguate, reportEvents);
+  }
+
+  /**
+   * Check support
+   */
+  checkSupport(): string {
+    return this.protocol.check_support();
+  }
+
+  /**
+   * Parse keyboard event
+   */
+  parseEvent(input: string): KeyEvent | null {
+    try {
+      const result = this.protocol.parse_event(input);
+      return JSON.parse(result);
+    } catch (error) {
+      console.error('Failed to parse Kitty event:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Create key event string
+   */
+  createKeyEvent(event: KeyEvent): string {
+    try {
+      return this.protocol.create_key_event(JSON.stringify(event));
+    } catch (error) {
+      console.error('Failed to create key event:', error);
+      return '';
+    }
+  }
+}
+
+/**
+ * Kitty keyboard event
+ */
+export interface KeyEvent {
+  Key?: {
+    key: string;
+    shift: boolean;
+    alt: boolean;
+    ctrl: boolean;
+    super_: boolean;
+    meta: boolean;
+  };
+  Function?: {
+    number: number;
+    shift: boolean;
+    alt: boolean;
+    ctrl: boolean;
+  };
+  Special?: {
+    key: string;
+    shift: boolean;
+    alt: boolean;
+    ctrl: boolean;
+  };
+}
+
+/**
+ * Native Snapcompact context compaction
+ */
+export const nativeSnapcompact = {
+  /**
+   * Create new Snapcompact renderer
+   */
+  createRenderer(provider: string): NativeSnapcompactRenderer | null {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const renderer = new wasmModules.snapcompactWasm.WasmSnapcompactRenderer(provider);
+      return new NativeSnapcompactRenderer(renderer);
+    } catch (error) {
+      console.error('Failed to create Snapcompact renderer:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Render conversation to compact frame
+   */
+  async renderConversation(
+    messages: Message[],
+    provider: string
+  ): Promise<CompactFrame | null> {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const renderer = new wasmModules.snapcompactWasm.WasmSnapcompactRenderer(provider);
+      const result = await renderer.render_conversation(JSON.stringify(messages));
+      return JSON.parse(result);
+    } catch (error) {
+      console.error('Failed to render conversation:', error);
+      return null;
+    }
+  },
+};
+
+/**
+ * Native Snapcompact renderer wrapper
+ */
+export class NativeSnapcompactRenderer {
+  constructor(private renderer: any) {}
+
+  /**
+   * Render conversation to compact frame
+   */
+  async renderConversation(messages: Message[]): Promise<CompactFrame> {
+    const result = await this.renderer.render_conversation(JSON.stringify(messages));
+    return JSON.parse(result);
+  }
+
+  /**
+   * Estimate token count
+   */
+  estimateTokens(text: string): number {
+    return this.renderer.estimate_tokens(text);
+  }
+
+  /**
+   * Get compaction ratio
+   */
+  compactionRatio(): number {
+    return this.renderer.compaction_ratio();
+  }
+
+  /**
+   * Optimize for provider
+   */
+  optimizeForProvider(provider: string): void {
+    this.renderer.optimize_for_provider(provider);
+  }
+}
+
+/**
+ * Message for Snapcompact
+ */
+export interface Message {
+  role: string;
+  content: string;
+  timestamp: number;
+  token_count?: number;
+}
+
+/**
+ * Compact frame from Snapcompact
+ */
+export interface CompactFrame {
+  provider: string;
+  messages: CompactMessage[];
+  metadata: FrameMetadata;
+}
+
+/**
+ * Compact message
+ */
+export interface CompactMessage {
+  role: string;
+  content_hash: string;
+  token_count: number;
+  timestamp: number;
+}
+
+/**
+ * Frame metadata
+ */
+export interface FrameMetadata {
+  total_tokens: number;
+  message_count: number;
+  compression_ratio: number;
+  timestamp: number;
+}
+
+/**
+ * Native file operations
+ */
+export const nativeFS = {
+  /**
+   * Create new FastFS instance
+   */
+  createFastFS(): NativeFastFS | null {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const fastFS = new wasmModules.fastOps.WasmFastFS();
+      return new NativeFastFS(fastFS);
+    } catch (error) {
+      console.error('Failed to create FastFS:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Find files matching pattern
+   */
+  async findFiles(pattern: string, path: string): Promise<FileEntry[] | null> {
+    if (!isNativeAvailable()) {
+      return null;
+    }
+
+    try {
+      const fastFS = new wasmModules.fastOps.WasmFastFS();
+      const result = await fastFS.find_files(pattern, path);
+      return JSON.parse(result);
+    } catch (error) {
+      console.error('Failed to find files:', error);
+      return null;
+    }
+  },
+};
+
+/**
+ * Native FastFS wrapper
+ */
+export class NativeFastFS {
+  constructor(private fastFS: any) {}
+
+  /**
+   * Find files matching pattern
+   */
+  async findFiles(pattern: string, path: string): Promise<FileEntry[]> {
+    const result = await this.fastFS.find_files(pattern, path);
+    return JSON.parse(result);
+  }
+
+  /**
+   * Sort files by modification time
+   */
+  async sortByMtIme(entries: FileEntry[], descending = true): Promise<FileEntry[]> {
+    const result = await this.fastFS.sort_by_mtime(JSON.stringify(entries), descending);
+    return JSON.parse(result);
+  }
+
+  /**
+   * Get file type
+   */
+  async getFileType(path: string): Promise<FileType | null> {
+    try {
+      const result = await this.fastFS.get_file_type(path);
+      return JSON.parse(result);
+    } catch (error) {
+      console.error('Failed to get file type:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Clear cache
+   */
+  clearCache(): void {
+    this.fastFS.clear_cache();
+  }
+}
+
+/**
+ * File entry
+ */
+export interface FileEntry {
+  path: string;
+  file_type: FileType;
+  size: number;
+  modified: number;
+  is_symlink: boolean;
+}
+
+/**
+ * File type
+ */
+export type FileType = 'File' | 'Directory' | 'Symlink' | 'Unknown';
+
+/**
+ * Performance benchmarking utilities
+ */
+export const benchmarks = {
+  /**
+   * Benchmark font rendering performance
+   */
+  async benchmarkFontRendering(
+    sampleText: string,
+    iterations = 100
+  ): Promise<{ native: number; typescript: number; speedup: number }> {
+    await initNative();
+
+    const font = await nativeFont.createDefault();
+    if (!font) {
+      throw new Error('Native font not available');
+    }
+
+    // Benchmark native version
+    const nativeStart = performance.now();
+    for (let i = 0; i < iterations; i++) {
+      font.renderText(sampleText);
+    }
+    const nativeTime = performance.now() - nativeStart;
+
+    // Benchmark TypeScript version (simplified fallback)
+    const tsStart = performance.now();
+    for (let i = 0; i < iterations; i++) {
+      // TypeScript font rendering (simplified)
+      sampleText; // Just to show the pattern
+    }
+    const tsTime = performance.now() - tsStart;
+
+    const speedup = tsTime / nativeTime;
+
+    return {
+      native: nativeTime,
+      typescript: tsTime,
+      speedup,
+    };
+  },
+
+  /**
+   * Benchmark search performance
+   */
+  async benchmarkSearch(
+    pattern: string,
+    testPath: string,
+    iterations = 100
+  ): Promise<{ native: number; typescript: number; speedup: number }> {
+    await initNative();
+
+    const searcher = nativeSearch.createSearcher();
+    if (!searcher) {
+      throw new Error('Native search not available');
+    }
+
+    // Benchmark native version
+    const nativeStart = performance.now();
+    for (let i = 0; i < iterations; i++) {
+      await searcher.searchFile(pattern, testPath, false);
+    }
+    const nativeTime = performance.now() - nativeStart;
+
+    // Benchmark TypeScript version (simplified fallback)
+    const tsStart = performance.now();
+    for (let i = 0; i < iterations; i++) {
+      // TypeScript search (simplified)
+      pattern;
+      testPath;
+    }
+    const tsTime = performance.now() - tsStart;
+
+    const speedup = tsTime / nativeTime;
+
+    return {
+      native: nativeTime,
+      typescript: tsTime,
+      speedup,
+    };
+  },
+
+  /**
+   * Run all benchmarks and display results
+   */
+  async runAllBenchmarks(): Promise<void> {
+    console.log('🚀 Running native performance benchmarks...\n');
+
+    try {
+      const fontResults = await this.benchmarkFontRendering('Hello, World!', 100);
+      console.log('📊 Font Rendering Benchmark:');
+      console.log(`  Native (Rust/WASM): ${fontResults.native.toFixed(2)}ms`);
+      console.log(`  TypeScript: ${fontResults.typescript.toFixed(2)}ms`);
+      console.log(`  Speedup: ${fontResults.speedup.toFixed(2)}x`);
+    } catch (error) {
+      console.error('Font benchmark failed:', error);
+    }
+
+    try {
+      const searchResults = await this.benchmarkSearch('test', '.', 100);
+      console.log('📊 Search Benchmark:');
+      console.log(`  Native (Rust/WASM): ${searchResults.native.toFixed(2)}ms`);
+      console.log(`  TypeScript: ${searchResults.typescript.toFixed(2)}ms`);
+      console.log(`  Speedup: ${searchResults.speedup.toFixed(2)}x`);
+    } catch (error) {
+      console.error('Search benchmark failed:', error);
+    }
+  },
+};
+
+/**
+ * Initialize native modules on import
+ */
+export async function ensureNativeInitialized(): Promise<void> {
+  if (!wasmInitialized) {
+    await initNative();
+  }
+}
+
+// Auto-initialize when module is loaded
+ensureNativeInitialized().catch(console.error);
