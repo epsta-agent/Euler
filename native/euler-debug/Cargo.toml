@@ -38,6 +38,11 @@ must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 return_self_not_must_use = "allow"
+needless_pass_by_value = "allow"
+# Style nits where the current form is clearer than the suggested rewrite.
+manual_let_else = "allow"
+similar_names = "allow"
+doc_markdown = "allow"
 # Production code already uses `?` for all fallible ops. The few remaining
 # `unwrap()`/`expect()` calls are on infallible-by-design results (poisoned
 # `Mutex::lock`, `stdin.lock()`), where panicking is the correct response, so

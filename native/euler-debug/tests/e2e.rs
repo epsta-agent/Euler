@@ -3,6 +3,10 @@
 //! lldb-dap (if installed). These are integration tests and are skipped when
 //! the relevant adapter is not present, so they pass in any environment.
 
+// Test diagnostics to stderr are legitimate; the `print_stderr` lint guards
+// the production binary'''s stdout purity, not test output.
+#![allow(clippy::print_stderr)]
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -19,12 +23,10 @@ fn binary_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // native/euler-debug -> native/target/debug/euler-debug
     p.push("../target/debug/euler-debug");
-    if !p.exists() {
-        panic!(
+    assert!(p.exists(), 
             "euler-debug binary not found at {}; run `cargo build -p euler-debug --bin euler-debug` first",
             p.display()
         );
-    }
     p
 }
 
@@ -96,8 +98,7 @@ fn python_with_debugpy() -> Option<String> {
         .stderr(Stdio::null())
         .status()
         .ok()
-        .map(|s| s.success())
-        .unwrap_or(false);
+        .is_some_and(|s| s.success());
     if ok {
         Some(py)
     } else {
@@ -144,12 +145,9 @@ fn detect_python_adapter() {
 
 #[test]
 fn full_python_session() {
-    let python = match python_with_debugpy() {
-        Some(p) => p,
-        None => {
-            eprintln!("skipping full_python_session: debugpy not installed");
-            return;
-        }
+    let python = if let Some(p) = python_with_debugpy() { p } else {
+        eprintln!("skipping full_python_session: debugpy not installed");
+        return;
     }
     .clone();
     let mut d = Driver::spawn();
@@ -217,8 +215,7 @@ fn full_python_session() {
     let locals_ref = scopes
         .iter()
         .find(|s| s["name"].as_str().unwrap_or("").to_lowercase().contains("local"))
-        .map(|s| s["variablesReference"].as_i64().unwrap())
-        .unwrap_or(scopes[0]["variablesReference"].as_i64().unwrap());
+        .map_or(scopes[0]["variablesReference"].as_i64().unwrap(), |s| s["variablesReference"].as_i64().unwrap());
 
     // Variables in the locals scope.
     let req = format!(r#"{{"op":"variables","variablesReference":{locals_ref}}}"#);
