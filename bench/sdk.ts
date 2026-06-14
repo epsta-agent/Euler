@@ -19,6 +19,7 @@
  */
 
 import { join } from 'path';
+import { existsSync, readFileSync } from 'fs';
 import { AgentCoordinator } from '../src/agent/agent/coordinator';
 import { tools } from '../src/agent/tool/index.ts';
 import {
@@ -30,6 +31,8 @@ import {
   evaluateTask,
   printSummary,
 } from './harness';
+import { startTaskContainer, TaskContainer, runLocal } from './docker-runner';
+import { containerTools } from './container-agent';
 import { writeFile, mkdir } from 'fs/promises';
 
 export interface RunOptions {
@@ -142,6 +145,10 @@ function createRunner(opts: RunOptions) {
 /**
  * Run the agent against every (or `only`) task in `taskDir` and return a
  * report. The caller supplies the API key.
+ *
+ * Dockerized tasks (those with a Dockerfile) are built and run inside a
+ * container; the agent operates on /app via `docker exec`. Hermetic tasks (no
+ * Dockerfile) run locally as before.
  */
 export async function runTerminalBench(opts: RunOptions): Promise<RunReport> {
   if (!opts.apiKey) throw new Error('runTerminalBench: apiKey is required (caller must supply it)');
@@ -153,30 +160,48 @@ export async function runTerminalBench(opts: RunOptions): Promise<RunReport> {
   const ids = await listTasks(taskDir);
   const chosen = opts.only ? ids.filter((id) => opts.only!.includes(id)) : ids;
 
-  const runner = createRunner(opts);
+  const localRunner = createRunner(opts);
   const results: TaskResult[] = [];
 
   for (const id of chosen) {
     const spec = await loadTask(taskDir, id);
-    console.log(`▶ ${id}`);
-    const { workDir, testsDir } = await prepareWorkspace(taskDir, id, workRoot);
+    const taskPath = join(taskDir, id);
+    const isDocker = existsSync(join(taskPath, 'Dockerfile'));
+    console.log(`▶ ${id}${isDocker ? ' [docker]' : ''}`);
 
+    let resolved = false;
+    let evaluatorOutput = '';
+    let turns = 0;
+    let error: string | undefined;
     const start = Date.now();
-    const outcome = await runner(spec, workDir);
-    const duration_ms = Date.now() - start;
 
-    const evalResult = await evaluateTask(spec, workDir, testsDir);
+    try {
+      if (isDocker) {
+        ({ resolved, evaluatorOutput, turns, error } = await runDockerTask(opts, spec, taskPath));
+      } else {
+        const { workDir, testsDir } = await prepareWorkspace(taskDir, id, workRoot);
+        const outcome = await localRunner(spec, workDir);
+        turns = outcome.turns;
+        error = outcome.error;
+        const evalResult = await evaluateTask(spec, workDir, testsDir);
+        resolved = evalResult.resolved;
+        evaluatorOutput = evalResult.output;
+      }
+    } catch (err: any) {
+      error = err?.message ?? String(err);
+    }
+
     results.push({
       id,
-      resolved: evalResult.resolved,
+      resolved,
       difficulty: spec.difficulty,
       category: spec.category,
-      turns: outcome.turns,
-      duration_ms,
-      evaluator_output: evalResult.output.slice(-3000),
-      error: outcome.error,
+      turns,
+      duration_ms: Date.now() - start,
+      evaluator_output: evaluatorOutput.slice(-3000),
+      error,
     });
-    console.log(`  → ${evalResult.resolved ? 'RESOLVED' : 'NOT resolved'}${outcome.error ? ` (${outcome.error})` : ''}`);
+    console.log(`  → ${resolved ? 'RESOLVED' : 'NOT resolved'}${error ? ` (${error})` : ''}`);
   }
 
   printSummary(results);
@@ -185,6 +210,133 @@ export async function runTerminalBench(opts: RunOptions): Promise<RunReport> {
     resolved: results.filter((r) => r.resolved).length,
     passRate: results.length === 0 ? 0 : (results.filter((r) => r.resolved).length / results.length) * 100,
   }};
+}
+
+/** Run a single Dockerized task: build, start container, agent, evaluator, teardown. */
+async function runDockerTask(
+  opts: RunOptions,
+  spec: TaskSpec,
+  taskPath: string,
+): Promise<{ resolved: boolean; evaluatorOutput: string; turns: number; error?: string }> {
+  const container = await startTaskContainer(taskPath, spec.id);
+  try {
+    // Copy the task's tests/ directory into /app/tests inside the container.
+    // (The Dockerfile only copies task data files; upstream mounts tests/ via
+    // docker-compose + TEST_DIR. We `docker cp` it in instead.)
+    if (existsSync(join(taskPath, 'tests'))) {
+      await runLocal(`docker cp ${join(taskPath, 'tests')} ${container.containerId}:/app/tests`, { timeoutMs: 60_000 });
+    }
+
+    // Install pytest in the container robustly. The base image ships Python but
+    // not always pytest/pip. Try several install paths so a missing pip (e.g.
+    // the "broken-python" task) doesn't silently fail the evaluator.
+    const installRes = await container.exec(
+      'python3 -m ensurepip --upgrade 2>/dev/null; ' +
+      'python3 -m pip install --quiet pytest 2>/dev/null; ' +
+      'pip3 install --quiet pytest 2>/dev/null; ' +
+      'apt-get update -qq 2>/dev/null && apt-get install -qq -y python3-pytest 2>/dev/null; ' +
+      'python3 -c "import pytest" 2>/dev/null && echo PYTEST_OK || echo PYTEST_MISSING',
+      180_000,
+    );
+    const pytestAvailable = installRes.stdout.includes('PYTEST_OK');
+
+    const agentTools = containerTools(container);
+    const coordinator = new AgentCoordinator(
+      {} as any,
+      agentTools,
+      {
+        provider: 'bench',
+        model: opts.model,
+        apiKey: opts.apiKey,
+        baseUrl: opts.baseUrl,
+        maxToolRounds: opts.maxToolRounds ?? 24,
+        temperature: 0,
+        systemPrompt: BASE_SYSTEM_PROMPT +
+          '\n\nYou are operating INSIDE a Docker container. The working directory is /app. ' +
+          'All file paths are relative to /app. Use the tools to inspect /app, then create ' +
+          'the deliverable described in the task.',
+        onBeforeModelCall: ({ round, toolsCalled }) => {
+          const produced = toolsCalled.some((t) => t === 'write' || t === 'edit');
+          if (!produced && round >= 3) {
+            return 'You have NOT created or modified any file yet. Stop exploring and call write() NOW to produce the deliverable.';
+          }
+          return undefined;
+        },
+      },
+    );
+
+    if (opts.verbose) {
+      coordinator.onEvent((e) => {
+        const d = e.data as any;
+        if (e.type === 'tool_start') console.log(`    [tool] ${d.tool}`, JSON.stringify(d.input).slice(0, 120));
+      });
+    }
+
+    let turns = 0;
+    coordinator.onEvent((e) => { if (e.type === 'tool_start') turns++; });
+
+    let error: string | undefined;
+    try {
+      await coordinator.process(spec.instruction);
+    } catch (err: any) {
+      error = err?.message ?? String(err);
+    }
+
+    // Run the evaluator inside the container at /app. Guard against the
+    // container having died during the agent run (a "No such container" error
+    // here would be a harness artifact, not a model failure).
+    const testDir = '/app/tests';
+    const aliveCheck = await runLocal(`docker inspect -f '{{.State.Running}}' ${container.containerId} 2>/dev/null`, { timeoutMs: 10_000 });
+    if (!aliveCheck.stdout.trim().startsWith('true')) {
+      return {
+        resolved: false,
+        evaluatorOutput: `container ${container.containerId} is not running; cannot evaluate (harness error, not a model failure)`,
+        turns,
+        error: 'container died before evaluation',
+      };
+    }
+
+    // Prefer the task's run-tests.sh when present: upstream tasks use it to
+    // install pytest + their specific deps (numpy, requests, ...) via uv, then
+    // run pytest. This is the authoritative evaluation path. Fall back to a
+    // plain pytest invocation when there's no run-tests.sh.
+    const hasRunTests = existsSync(join(taskPath, 'run-tests.sh'));
+    // Copy run-tests.sh into the container if present (it lives outside /app
+    // in the source tree; the Dockerfile doesn't copy it).
+    if (hasRunTests) {
+      await runLocal(`docker cp ${join(taskPath, 'run-tests.sh')} ${container.containerId}:/app/run-tests.sh`, { timeoutMs: 30_000 });
+      await container.exec('chmod +x /app/run-tests.sh');
+    }
+
+    let evalRes;
+    if (hasRunTests) {
+      // run-tests.sh expects $TEST_DIR and runs in /app.
+      evalRes = await container.exec(
+        `cd /app && TEST_DIR=${testDir} bash /app/run-tests.sh 2>&1`,
+        Math.max((spec.max_test_timeout_sec ?? 180) * 1000, 240_000),
+      );
+    } else if (pytestAvailable) {
+      evalRes = await container.exec(
+        `python3 -m pytest ${testDir}/test_outputs.py -rA 2>&1`,
+        (spec.max_test_timeout_sec ?? 180) * 1000,
+      );
+    } else {
+      return {
+        resolved: false,
+        evaluatorOutput: 'pytest could not be installed in the container and no run-tests.sh is present (harness limitation)',
+        turns,
+        error: 'pytest unavailable',
+      };
+    }
+    return {
+      resolved: evalRes.code === 0,
+      evaluatorOutput: evalRes.stdout,
+      turns,
+      error,
+    };
+  } finally {
+    await container.stop();
+  }
 }
 
 /** Persist a RunReport to disk. */

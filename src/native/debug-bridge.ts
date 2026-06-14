@@ -41,6 +41,7 @@ export type DebugOp =
   | { op: 'stepOver'; threadId: number }
   | { op: 'stepIn'; threadId: number }
   | { op: 'stepOut'; threadId: number }
+  | { op: 'waitForStop'; timeoutMs?: number }
   | { op: 'disconnect'; terminate?: boolean }
   | { op: 'status' };
 

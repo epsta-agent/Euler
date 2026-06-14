@@ -25,8 +25,10 @@ export const debugTool: Tool = {
     'Real DAP debugger (drives debugpy / lldb-dap / dlv / node via the Rust euler-debug binary). ' +
     'Each call performs ONE discrete step of the DAP lifecycle: start, launch, setBreakpoints, ' +
     'configurationDone, threads, stackTrace, scopes, variables, evaluate, continue, pause, ' +
-    'stepOver, stepIn, stepOut, status, disconnect. The typical order to debug a program is: ' +
-    'start -> launch -> setBreakpoints -> configurationDone -> threads -> stackTrace -> scopes -> variables.',
+    'stepOver, stepIn, stepOut, waitForStop, status, disconnect. The typical order to debug a program is: ' +
+    'start -> launch -> setBreakpoints -> configurationDone -> continue -> waitForStop -> ' +
+    'stackTrace -> scopes -> variables. Use waitForStop AFTER continue/stepOver/stepIn/stepOut to ' +
+    'block until the program stops at a breakpoint (do NOT sleep or poll threads).',
   category: 'discoverable',
   parameters: [
     {
@@ -35,7 +37,7 @@ export const debugTool: Tool = {
       description:
         'The single operation to perform. One of: start, launch, setBreakpoints, configurationDone, ' +
         'threads, stackTrace, scopes, variables, evaluate, continue, pause, stepOver, stepIn, stepOut, ' +
-        'status, disconnect.',
+        'waitForStop, status, disconnect.',
       required: true,
     },
     {
@@ -111,6 +113,14 @@ export const debugTool: Tool = {
       required: false,
       default: true,
     },
+    {
+      name: 'timeoutMs',
+      type: 'number',
+      description:
+        'For "waitForStop": maximum milliseconds to block waiting for the program to stop ' +
+        '(default 30000, capped at 60000 by the binary).',
+      required: false,
+    },
   ],
   examples: [
     {
@@ -127,6 +137,15 @@ export const debugTool: Tool = {
       input: { op: 'evaluate', expression: 'x + y', frameId: 1 },
       output: { result: { name: 'x + y', value: '42', variablesReference: 0 } },
       description: 'Evaluate an expression in a frame.',
+    },
+    {
+      input: { op: 'waitForStop', timeoutMs: 15000 },
+      output: {
+        wait: { event: 'stopped', threadId: 1, reason: 'breakpoint', allThreadsStopped: true },
+      },
+      description:
+        'After continue/step*, block until the program stops. Returns the stop reason and thread. ' +
+        'Prefer this over polling threads or sleeping.',
     },
   ],
   handler: async (input: Record<string, any>): Promise<ToolResult> => {
@@ -226,6 +245,14 @@ function buildRequest(
     case 'status':
       return { op };
 
+    case 'waitForStop': {
+      const req: Record<string, unknown> = { op };
+      if (typeof input.timeoutMs === 'number' && Number.isFinite(input.timeoutMs)) {
+        req.timeoutMs = Math.max(0, Math.floor(input.timeoutMs));
+      }
+      return req;
+    }
+
     case 'disconnect':
       return { op, terminate: input.terminate !== false };
 
@@ -269,7 +296,7 @@ function buildRequest(
         error:
           `Unknown op '${op}'. Valid ops: start, launch, setBreakpoints, configurationDone, ` +
           'threads, stackTrace, scopes, variables, evaluate, continue, pause, stepOver, ' +
-          'stepIn, stepOut, status, disconnect.',
+          'stepIn, stepOut, waitForStop, status, disconnect.',
       };
   }
 }
@@ -288,13 +315,17 @@ function checkNumber(input: Record<string, any>, key: string): number | null {
   return null;
 }
 
-/** Allow longer timeouts for slow lifecycle ops (launch can spawn a process). */
+/** Allow longer timeouts for slow lifecycle ops (launch can spawn a process).
+ * waitForStop blocks until the program stops; the binary caps the wait at 60s
+ * so a 65s RPC timeout gives it comfortable headroom. */
 function requestTimeoutFor(op: string): number {
   switch (op) {
     case 'start':
     case 'launch':
     case 'attach':
       return 60_000;
+    case 'waitForStop':
+      return 65_000;
     default:
       return 30_000;
   }

@@ -186,16 +186,19 @@ fn full_python_session() {
     let resp = d.send(r#"{"op":"configurationDone"}"#);
     assert_eq!(resp["ok"], true, "configurationDone failed: {resp}");
 
-    // Give the program a moment to hit the breakpoint, then list threads.
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    let resp = d.send(r#"{"op":"threads"}"#);
-    assert_eq!(resp["ok"], true, "threads failed: {resp}");
-    let threads = resp["result"]["threads"].as_array().expect("threads array");
-    let main_thread = threads
-        .iter()
-        .find(|t| t["name"].as_str().unwrap_or("").contains("MainThread") || t["id"].as_i64() == Some(1))
-        .expect("a main thread");
-    let tid = main_thread["id"].as_i64().unwrap();
+    // Block until the breakpoint is hit. This replaces a fragile fixed sleep:
+    // waitForStop drains adapter `stopped` events and returns the moment the
+    // debuggee pauses (or times out / terminates).
+    let resp = d.send(r#"{"op":"waitForStop","timeoutMs":15000}"#);
+    assert_eq!(resp["ok"], true, "waitForStop failed: {resp}");
+    let event = resp["result"]["wait"]["event"].as_str().unwrap_or("");
+    assert_eq!(
+        event, "stopped",
+        "expected the breakpoint to stop the program, got: {resp}"
+    );
+    let tid = resp["result"]["wait"]["threadId"]
+        .as_i64()
+        .expect("a thread id on the stopped event");
 
     // Stack trace.
     let req = format!(r#"{{"op":"stackTrace","threadId":{tid}}}"#);

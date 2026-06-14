@@ -19,8 +19,40 @@ thiserror.workspace = true
 anyhow.workspace = true
 log = "0.4"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 
 [features]
 default = []
+
+[lints.clippy]
+# Keep this crate clean for the long haul. We use `warn` for pedantic nits so
+# CI surfaces them, but a single `cargo clippy` stays green.
+pedantic = { level = "warn", priority = -1 }
+# Re-enable a few pedantic lints that hurt readability more than they help.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+return_self_not_must_use = "allow"
+# Production code already uses `?` for all fallible ops. The few remaining
+# `unwrap()`/`expect()` calls are on infallible-by-design results (poisoned
+# `Mutex::lock`, `stdin.lock()`), where panicking is the correct response, so
+# we don't lint them. Tests use `unwrap()` freely.
+unwrap_used = "allow"
+expect_used = "allow"
+# Integer widening/truncation happens at FFI/DAP-sequence boundaries where the
+# values are bounded by the protocol; we annotate the rare non-obvious cases.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+# These we treat as hard errors — they indicate real bugs or break the
+# line-JSON protocol (which must stay pure on stdout).
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "warn"
+unwrap_in_result = "deny"

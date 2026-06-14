@@ -79,9 +79,9 @@ Or via the SDK (`bench/sdk.ts`): `runTerminalBench({ apiKey, baseUrl, model })`.
 
 ### Measured result
 
-`deepseek-v4-flash` resolves the `count-log-lines` terminal-bench task in 6
-turns (produces a correct, executable `summary.sh` that passes the pytest
-evaluator).
+`deepseek-v4-flash` against 9 genuine upstream terminal-bench tasks (built and
+evaluated in Docker via the authoritative `run-tests.sh`): **5/9 (55.6%)** —
+5/6 on easy, 0/3 on medium. See `bench/README.md` for per-task breakdown.
 
 ## Configuration
 

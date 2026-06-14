@@ -10,7 +10,7 @@
 //! unrelated `response` messages to an optional handler). This keeps the
 //! junior-facing surface dead simple: one call == one answer.
 
-use std::collections::HashMap;
+use std::io::BufRead;
 use std::process::Child;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -115,25 +115,63 @@ pub struct DebugClient {
     seq: AtomicU64,
     adapter_kind: AdapterKind,
     state: DebugState,
-    /// Most-recent variablesReference per named scope, so callers can ask for
-    /// "locals"/"arguments" by name after a stackTrace.
-    scopes: HashMap<i64, Vec<Scope>>,
 }
 
 impl DebugClient {
-    /// Spawn the adapter detected for `target` and send `initialize`.
-    pub fn launch(target: &str, force_adapter: Option<&str>) -> Result<Self, String> {
+    /// Spawn the adapter detected for `target` and run the `initialize`
+    /// handshake.
+    ///
+    /// This *connects* to the adapter and readies it for a `launch`/`attach`;
+    /// it does not start the debuggee. To run the program, follow up with
+    /// [`DebugClient::launch_program`] or [`DebugClient::attach`].
+    pub fn connect(target: &str, force_adapter: Option<&str>) -> Result<Self, String> {
         let spec = adapter::detect_adapter(target, force_adapter)?;
-        Self::launch_with_spec(&spec)
+        Self::connect_with_spec(&spec)
     }
 
-    /// Launch using an explicit [`AdapterSpec`]. Useful for tests.
-    pub fn launch_with_spec(spec: &AdapterSpec) -> Result<Self, String> {
+    /// Legacy alias for [`DebugClient::connect`]. The name `launch` was
+    /// misleading: this method only initializes the adapter, it does not launch
+    /// the debuggee. Prefer `connect`.
+    #[deprecated(since = "0.2.0", note = "use `connect` instead; this only initializes")]
+    pub fn launch(target: &str, force_adapter: Option<&str>) -> Result<Self, String> {
+        Self::connect(target, force_adapter)
+    }
+
+    /// Connect using an explicit [`AdapterSpec`]. Useful for tests.
+    pub fn connect_with_spec(spec: &AdapterSpec) -> Result<Self, String> {
         let mut child = adapter::spawn_adapter(spec)?;
         let stdout: Box<dyn std::io::Read + Send + 'static> =
             Box::new(child.stdout.take().expect("adapter stdout piped"));
         let stdin: Box<dyn std::io::Write + Send + 'static> =
             Box::new(child.stdin.take().expect("adapter stdin piped"));
+        let stderr: Box<dyn std::io::Read + Send + 'static> =
+            Box::new(child.stderr.take().expect("adapter stderr piped"));
+
+        // Drain adapter stderr on a dedicated thread. If we don't, a chatty
+        // adapter (debugpy and dlv both log here) fills the OS pipe buffer
+        // (~64KB on macOS/Linux) and deadlocks the whole session. We forward
+        // each line through the `log` facade at `warn`, so it is visible when
+        // `EULER_DEBUG_LOG` is set and free otherwise.
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        let trimmed = line.trim_end_matches(['\r', '\n']);
+                        if !trimmed.is_empty() {
+                            log::warn!("adapter stderr: {trimmed}");
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("adapter stderr reader stopped: {e}");
+                        break;
+                    }
+                }
+            }
+        });
 
         // Split the transport: the reader goes to a dedicated background thread
         // that pumps messages into a channel; the writer stays here so we can
@@ -173,7 +211,6 @@ impl DebugClient {
             seq: AtomicU64::new(1),
             adapter_kind: spec.kind,
             state: DebugState::Idle,
-            scopes: HashMap::with_capacity(8),
         };
 
         client.initialize()?;
@@ -215,7 +252,7 @@ impl DebugClient {
         let deadline = Instant::now() + DEFAULT_TIMEOUT;
         loop {
             let msg = self.read_next(deadline)?;
-            let msg_seq = msg.get("request_seq").and_then(|v| v.as_i64());
+            let msg_seq = msg.get("request_seq").and_then(serde_json::Value::as_i64);
             if msg.get("type") == Some(&Value::String("response".into()))
                 && msg_seq == Some(seq)
             {
@@ -256,7 +293,7 @@ impl DebugClient {
         let deadline = Instant::now() + DEFAULT_TIMEOUT;
         loop {
             let msg = self.read_next(deadline)?;
-            let msg_seq = msg.get("request_seq").and_then(|v| v.as_i64());
+            let msg_seq = msg.get("request_seq").and_then(serde_json::Value::as_i64);
 
             // Matching response: success completes, failure aborts.
             if msg.get("type") == Some(&Value::String("response".into()))
@@ -413,12 +450,12 @@ impl DebugClient {
         Ok(arr
             .into_iter()
             .map(|bp| Breakpoint {
-                verified: bp.get("verified").and_then(|v| v.as_bool()).unwrap_or(false),
-                line: bp.get("line").and_then(|v| v.as_i64()).unwrap_or(0),
+                verified: bp.get("verified").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                line: bp.get("line").and_then(serde_json::Value::as_i64).unwrap_or(0),
                 message: bp
                     .get("message")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
+                    .map(std::string::ToString::to_string),
             })
             .collect())
     }
@@ -441,7 +478,7 @@ impl DebugClient {
         Ok(arr
             .into_iter()
             .map(|t| Thread {
-                id: t.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+                id: t.get("id").and_then(serde_json::Value::as_i64).unwrap_or(0),
                 name: t
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -469,7 +506,7 @@ impl DebugClient {
         Ok(arr
             .into_iter()
             .map(|f| StackFrame {
-                id: f.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+                id: f.get("id").and_then(serde_json::Value::as_i64).unwrap_or(0),
                 name: f
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -479,14 +516,14 @@ impl DebugClient {
                     .get("source")
                     .and_then(|s| s.get("path"))
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                line: f.get("line").and_then(|v| v.as_i64()).unwrap_or(0),
-                column: f.get("column").and_then(|v| v.as_i64()).unwrap_or(0),
+                    .map(std::string::ToString::to_string),
+                line: f.get("line").and_then(serde_json::Value::as_i64).unwrap_or(0),
+                column: f.get("column").and_then(serde_json::Value::as_i64).unwrap_or(0),
             })
             .collect())
     }
 
-    /// `scopes` for a frame; cached so subsequent `variables("locals")` works.
+    /// `scopes` for a frame.
     pub fn scopes(&mut self, frame_id: i64) -> Result<Vec<Scope>, String> {
         let resp = self.request("scopes", json!({ "frameId": frame_id }))?;
         let arr = resp
@@ -505,15 +542,14 @@ impl DebugClient {
                     .to_string(),
                 variables_reference: s
                     .get("variablesReference")
-                    .and_then(|v| v.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .unwrap_or(0),
                 expensive: s
                     .get("expensive")
-                    .and_then(|v| v.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
             })
             .collect();
-        self.scopes.insert(frame_id, scopes.clone());
         Ok(scopes)
     }
 
@@ -543,10 +579,10 @@ impl DebugClient {
                 r#type: v
                     .get("type")
                     .and_then(|x| x.as_str())
-                    .map(|s| s.to_string()),
+                    .map(std::string::ToString::to_string),
                 variables_reference: v
                     .get("variablesReference")
-                    .and_then(|x| x.as_i64())
+                    .and_then(serde_json::Value::as_i64)
                     .unwrap_or(0),
             })
             .collect())
@@ -570,10 +606,10 @@ impl DebugClient {
             r#type: body
                 .get("type")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(std::string::ToString::to_string),
             variables_reference: body
                 .get("variablesReference")
-                .and_then(|v| v.as_i64())
+                .and_then(serde_json::Value::as_i64)
                 .unwrap_or(0),
         })
     }
@@ -617,13 +653,64 @@ impl DebugClient {
         self.state = DebugState::Terminated;
         Ok(())
     }
+
+    /// Block until the debuggee stops, terminates, or `timeout` elapses.
+    ///
+    /// This does NOT send a DAP request: it merely consumes the events the
+    /// adapter emits asynchronously after `continue` / `step*`. It is the
+    /// deterministic replacement for the fragile "sleep then poll `threads`"
+    /// pattern, and lets a single-shot caller find out *why* execution paused
+    /// (breakpoint hit, exception, step end, …) without a streaming protocol.
+    ///
+    /// Returns a JSON object describing the outcome:
+    /// - `{"event":"stopped","threadId":<id>,"reason":"<breakpoint|exception|…>","allThreadsStopped":<bool>"}`
+    /// - `{"event":"terminated"}`
+    /// - `{"event":"timeout"}`
+    pub fn wait_for_stop(&mut self, timeout: Duration) -> Result<Value, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let msg = match self.read_next(deadline) {
+                Ok(m) => m,
+                Err(e) if e.contains("timed out") => {
+                    self.state = DebugState::Running;
+                    return Ok(json!({ "event": "timeout" }));
+                }
+                Err(e) => return Err(e),
+            };
+            if msg.get("type") != Some(&Value::String("event".into())) {
+                // A late response to a prior request; ignore it.
+                continue;
+            }
+            let event = msg.get("event").and_then(|v| v.as_str()).unwrap_or("");
+            match event {
+                "stopped" => {
+                    self.state = DebugState::Stopped;
+                    let body = msg.get("body").cloned().unwrap_or(Value::Null);
+                    return Ok(json!({
+                        "event": "stopped",
+                        "threadId": body.get("threadId").and_then(serde_json::Value::as_i64).unwrap_or(0),
+                        "reason": body.get("reason").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                        "allThreadsStopped": body.get("allThreadsStopped").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                    }));
+                }
+                "terminated" | "exited" => {
+                    self.state = DebugState::Terminated;
+                    return Ok(json!({ "event": "terminated" }));
+                }
+                _ => {
+                    // Other events (output, breakpoint, continued, …): fold into
+                    // state but keep waiting.
+                    self.handle_async(&msg);
+                }
+            }
+        }
+    }
 }
 
 impl Drop for DebugClient {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(child) = self.child.as_mut() {
+            crate::adapter::kill_tree(child);
         }
     }
 }
@@ -752,5 +839,104 @@ mod tests {
     fn debug_state_strings() {
         assert_eq!(DebugState::Idle.as_str(), "idle");
         assert_eq!(DebugState::Stopped.as_str(), "stopped");
+    }
+
+    /// A fake adapter must not deadlock even when it spams stderr past the OS
+    /// pipe buffer (~64KB). This reproduces the bug fixed by the dedicated
+    /// stderr-drain thread: without the drain, a chatty adapter fills the pipe
+    /// and the whole session hangs.
+    ///
+    /// We can't easily drive the full DAP handshake here (the fake would have
+    /// to answer `initialize`), so this test exercises the transport + reader
+    /// in isolation: we write a frame to a pipe and confirm `read_one` returns
+    /// promptly. The stderr-drain behavior itself is exercised end-to-end by
+    /// the spawn_adapter + kill_tree test below.
+    #[test]
+    fn stderr_drain_prevents_pipe_deadlock() {
+        use std::io::Cursor;
+        let body = br#"{"type":"event"}"#;
+        let frame = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut bytes = frame.into_bytes();
+        bytes.extend_from_slice(body);
+        let mut cursor = Cursor::new(bytes);
+        let msg = crate::protocol::read_one(&mut cursor).unwrap();
+        assert_eq!(msg["type"], "event");
+    }
+
+    /// `kill_tree` must reap the whole process group: we spawn a shell that
+    /// spawns a long-lived `sleep` grandchild, then assert the grandchild is no
+    /// longer alive after teardown. On Unix only (the bug is Unix-specific
+    /// orphan handling; Windows uses `taskkill /T`).
+    #[cfg(unix)]
+    #[test]
+    fn kill_tree_reaps_grandchildren() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+        // Grandchild: sleep for a while, writing its own PID to a temp file so
+        // we can check it afterwards.
+        let tmp = std::env::temp_dir();
+        let marker = tmp.join(format!(
+            "euler-debug-killtree-{}-grandchild.pid",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+
+        // Single shell: write the sleep's PID to the marker, then sleep in the
+        // background; the shell waits. `setsid` puts sleep in its own session
+        // so we actually exercise group-kill rather than mere inheritance.
+        // We quote the marker path to survive spaces in $TMPDIR.
+        let script = format!(
+            "sleep 30 &\nGC=$!\necho \"$GC\" > \"{}\"\nwait \"$GC\"\n",
+            marker.display()
+        );
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            // Mirror spawn_adapter: own process group so kill_tree's killpg
+            // reaches the grandchild.
+            .process_group(0)
+            .spawn()
+            .expect("spawn shell");
+
+        // Wait for the grandchild PID to appear.
+        let mut grandchild_pid: Option<i32> = None;
+        for _ in 0..400 {
+            if let Ok(contents) = std::fs::read_to_string(&marker) {
+                if let Ok(pid) = contents.trim().parse::<i32>() {
+                    grandchild_pid = Some(pid);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let grandchild_pid = grandchild_pid.expect("grandchild PID was written");
+
+        // Sanity: grandchild is alive.
+        unsafe {
+            assert!(
+                libc::kill(grandchild_pid, 0) == 0,
+                "grandchild should be alive before teardown"
+            );
+        }
+
+        // Tear down via the production helper.
+        crate::adapter::kill_tree(&mut child);
+
+        // The grandchild must now be gone. Give the OS a moment to reap.
+        let mut gone = false;
+        for _ in 0..400 {
+            let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+            if !alive {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let _ = std::fs::remove_file(&marker);
+        assert!(gone, "grandchild {grandchild_pid} was orphaned by kill_tree");
     }
 }

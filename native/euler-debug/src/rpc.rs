@@ -103,6 +103,14 @@ pub enum RpcRequest {
         #[serde(alias = "threadId")]
         thread_id: i64,
     },
+    /// Block until the debuggee stops or terminates. Does not send a DAP
+    /// request; just drains adapter events. `timeoutMs` caps the wait
+    /// (default 30s, hard ceiling 60s).
+    #[serde(rename = "waitForStop")]
+    WaitForStop {
+        #[serde(default, alias = "timeoutMs", alias = "timeout_ms")]
+        timeout_ms: Option<u64>,
+    },
     /// Disconnect / end the session.
     #[serde(rename = "disconnect")]
     Disconnect { #[serde(default = "default_true")] terminate: bool },
@@ -189,7 +197,7 @@ impl RpcSession {
                         "a session is already active; call 'disconnect' first".into(),
                     ));
                 }
-                let client = DebugClient::launch(&target, adapter.as_deref())?;
+                let client = DebugClient::connect(&target, adapter.as_deref())?;
                 let kind = client.adapter_kind();
                 self.client = Some(client);
                 Ok(serde_json::json!({
@@ -225,6 +233,7 @@ impl RpcSession {
             | RpcRequest::StepOver { .. }
             | RpcRequest::StepIn { .. }
             | RpcRequest::StepOut { .. }
+            | RpcRequest::WaitForStop { .. }
             | RpcRequest::Disconnect { .. }) => {
                 self.require_active(&req)
             }
@@ -316,6 +325,14 @@ impl RpcSession {
                 c.step_out(*thread_id)?;
                 Ok(serde_json::json!({ "step": "out", "threadId": thread_id }))
             }
+            RpcRequest::WaitForStop { timeout_ms } => {
+                let c = self.client()?;
+                // Default 30s; hard ceiling 60s so a forgotten agent call can't
+                // pin a session forever.
+                let ms = timeout_ms.unwrap_or(30_000).min(60_000);
+                let result = c.wait_for_stop(std::time::Duration::from_millis(ms))?;
+                Ok(serde_json::json!({ "wait": result }))
+            }
             RpcRequest::Disconnect { terminate } => {
                 if let Some(c) = self.client.as_mut() {
                     c.disconnect(*terminate)?;
@@ -385,6 +402,34 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn parses_wait_for_stop_request() {
+        // With an explicit timeout.
+        let line = r#"{"op":"waitForStop","timeoutMs":5000}"#;
+        let req: RpcRequest = serde_json::from_str(line).unwrap();
+        match req {
+            RpcRequest::WaitForStop { timeout_ms } => {
+                assert_eq!(timeout_ms, Some(5000));
+            }
+            _ => panic!("wrong variant"),
+        }
+        // Without a timeout (default applies in the handler).
+        let line = r#"{"op":"waitForStop"}"#;
+        let req: RpcRequest = serde_json::from_str(line).unwrap();
+        match req {
+            RpcRequest::WaitForStop { timeout_ms } => assert_eq!(timeout_ms, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn wait_for_stop_requires_active_session() {
+        let mut s = RpcSession::new();
+        let req = RpcRequest::WaitForStop { timeout_ms: None };
+        let err = s.handle(req).unwrap_err();
+        assert!(err.0.contains("no active session"));
     }
 
     #[test]

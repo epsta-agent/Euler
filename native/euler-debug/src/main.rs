@@ -12,12 +12,18 @@
 //! {"op":"disconnect","terminate":true}
 //! {"ok":true,"result":{"terminated":true}}
 //! ```
+//!
+//! Logging: the protocol lives on stdout, so log records go to **stderr** and
+//! are silent unless `EULER_DEBUG_LOG` is set (to `trace`, `debug`, `info`,
+//! `warn`, or `error`). This keeps the agent's stdout stream pure JSON while
+//! still letting a human diagnose adapter failures.
 
 use std::io::{self, BufRead, Write};
 
 use euler_debug::rpc::{RpcRequest, RpcResponse, RpcSession};
 
 fn main() {
+    init_logging();
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -60,4 +66,65 @@ fn main() {
     }
 
     // Session drops here, which kills any live adapter child.
+}
+
+/// Install a minimal `log` logger that writes to **stderr** (never stdout,
+/// which carries the JSON protocol). Activation is opt-in via the
+/// `EULER_DEBUG_LOG` env var so the binary is silent by default — important
+/// because the agent process parses stdout line-by-line and any stray log
+/// output there would corrupt the protocol.
+///
+/// We hand-roll this (rather than pulling in `env_logger`) to keep the
+/// dependency surface of this binary minimal; it is ~20 lines.
+fn init_logging() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let level = std::env::var("EULER_DEBUG_LOG").ok().and_then(|raw| {
+            let raw = raw.trim().to_ascii_lowercase();
+            match raw.as_str() {
+                "off" => Some(log::LevelFilter::Off),
+                "error" => Some(log::LevelFilter::Error),
+                "warn" => Some(log::LevelFilter::Warn),
+                "info" => Some(log::LevelFilter::Info),
+                "debug" => Some(log::LevelFilter::Debug),
+                "trace" => Some(log::LevelFilter::Trace),
+                _ => None,
+            }
+        });
+        // Default to Off so stdout stays pure; flip on only if asked.
+        let max = level.unwrap_or(log::LevelFilter::Off);
+        log::set_max_level(max);
+        let result = log::set_logger(&STDERR_LOGGER);
+        // set_logger can only fail if called twice; INIT guards against that.
+        debug_assert!(result.is_ok(), "log::set_logger called twice");
+    });
+}
+
+/// The single static logger instance. Routes records to stderr with a
+/// `euler-debug: <LEVEL> <message>` prefix.
+static STDERR_LOGGER: StderrLogger = StderrLogger;
+
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::max_level()
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        // stderr is not part of the JSON protocol; safe to write here. Ignore
+        // errors (stderr closed is not actionable).
+        let _ = writeln!(
+            io::stderr(),
+            "euler-debug: {} {}",
+            record.level(),
+            record.args()
+        );
+    }
+
+    fn flush(&self) {}
 }

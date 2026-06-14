@@ -13,7 +13,7 @@
 //! `Write` (adapter stdin). It is synchronous and blocking, matching how DAP
 //! adapters operate on stdio.
 
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufWriter, Write};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -63,7 +63,8 @@ impl<R: BufRead + Send + 'static, W: Write + Send + 'static> DapTransport<R, W> 
     /// buffer so we never hit the `write!` formatter on the hot path.
     pub fn send_message(&self, msg: &Value) -> Result<(), DapError> {
         let body = serde_json::to_vec(msg)?;
-        let w = &mut *self.writer.lock().unwrap();
+        let mut guard = self.writer.lock().map_err(poison_lock_error)?;
+        let w = &mut *guard;
         // Pre-format the Content-Length header into a small stack buffer.
         // 32 bytes is plenty for "Content-Length: <u64>\r\n\r\n".
         let mut header = [0u8; 32];
@@ -83,19 +84,20 @@ impl<R: BufRead + Send + 'static, W: Write + Send + 'static> DapTransport<R, W> 
     /// Read a single DAP message (header + body). Blocks until a whole frame
     /// is available or the stream ends.
     pub fn read_message(&self) -> Result<Value, DapError> {
-        let r = &mut *self.reader.lock().unwrap();
+        let mut guard = self.reader.lock().map_err(poison_lock_error)?;
+        let r = &mut *guard;
         read_one(r)
     }
 }
 
-/// Convenience constructor that wraps a raw `Child`'s stdout/stdin into a
-/// transport. Returns `(transport, child_handle)` so the caller can wait on
-/// the child.
-pub fn transport_from_child(
-    stdout: Box<dyn Read + Send + 'static>,
-    stdin: Box<dyn Write + Send + 'static>,
-) -> DapTransport<BufReader<Box<dyn Read + Send + 'static>>, Box<dyn Write + Send + 'static>> {
-    DapTransport::new(BufReader::new(stdout), stdin)
+/// Map a poisoned-`Mutex` error to a `DapError`. A poisoned lock means a
+/// thread panicked while holding it; we surface that as an I/O error so
+/// callers can handle it through the normal `Result` path instead of
+/// panicking the whole session.
+fn poison_lock_error<T>(_: T) -> DapError {
+    DapError::Io(io::Error::other(
+        "DAP transport mutex poisoned",
+    ))
 }
 
 /// Read a single framed DAP message from `r`.
@@ -111,7 +113,7 @@ pub fn read_one<R: BufRead>(r: &mut R) -> Result<Value, DapError> {
             // EOF before any header on a fresh read.
             return Err(DapError::Eof);
         }
-        let trimmed = header.trim_end_matches(|c| c == '\r' || c == '\n');
+        let trimmed = header.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             // Blank line: end of headers.
             break;
@@ -239,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn ita_into_formats_decimal() {
+    fn itoa_into_formats_decimal() {
         let mut out = [0u8; 8];
         let n = itoa_into(0, &mut out);
         assert_eq!(&out[..n], b"0");

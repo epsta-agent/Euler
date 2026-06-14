@@ -1,9 +1,16 @@
 # Terminal-Bench harness
 
-An evaluation harness compatible with the
-[terminal-bench](https://github.com/harbor-framework/terminal-bench) task
-schema. It runs the Euler agent (real tool-use loop + junior-friendly tools)
-against terminal-bench tasks and reports the pass rate.
+An evaluation harness compatible with the real
+[terminal-bench](https://github.com/harbor-framework/terminal-bench) task set.
+It runs the Euler agent (real tool-use loop + junior-friendly tools) against
+genuine terminal-bench tasks and reports the pass rate.
+
+Both task kinds are supported:
+- **Dockerized tasks** (the majority of upstream tasks): the harness builds the
+  task image, starts a container, runs the agent inside `/app` via
+  `docker exec`, copies `tests/` in, and runs the pytest evaluator in the
+  container.
+- **Hermetic tasks** (no Dockerfile): the agent operates on a local copy.
 
 The harness does **not** hardcode any API key. The caller supplies one.
 
@@ -12,7 +19,11 @@ The harness does **not** hardcode any API key. The caller supplies one.
 ```
 bench/tasks/<id>/
 ├── task.yaml          # instruction, parser_name, timeouts, metadata
+├── Dockerfile         # (Dockerized tasks) builds the /app environment
 ├── tests/
+│   └── test_outputs.py   # pytest evaluator (the PASS criterion)
+└── <input files>      # data the agent works on (copied into /app)
+```
 │   └── test_outputs.py   # pytest evaluator (the PASS criterion)
 └── <input files>      # data the agent works on (e.g. access_log)
 ```
@@ -61,7 +72,27 @@ Drop a directory under `bench/tasks/` with a `task.yaml` + `tests/test_outputs.p
 + any input files. See `bench/tasks/count-log-lines/` for a self-contained
 example (no Docker).
 
-## Validated
+## Measured result (real upstream terminal-bench tasks)
 
-- Oracle runner (applies the known fix) → 1/1 resolved.
-- Real model run: `deepseek-v4-flash` resolves `count-log-lines` in 6 turns.
+`deepseek-v4-flash` run against 9 genuine tasks vendored from
+`harbor-framework/terminal-bench/original-tasks/`, each built and evaluated in
+Docker via the authoritative `run-tests.sh` path:
+
+| difficulty | resolved | total |
+|---|---|---|
+| easy | 5 | 6 |
+| medium | 0 | 3 |
+| **all** | **5** | **9 (55.6%)** |
+
+Resolved: `analyze-access-logs`, `broken-python`, `fix-permissions`,
+`hello-world`, `multistep-definite-integral`.
+
+Not resolved: `count-dataset-tokens`, `fibonacci-server`, `grid-pattern-transform`
+(flaky across runs — model non-determinism), `sqlite-with-gcov`. The failures
+are genuine model-capability issues (wrong outputs, server not started), not
+harness artifacts — the evaluator runs in each case.
+
+Full per-task output: `bench/results-deepseek-v4-flash-9tasks.json`.
+
+This is a small sample (9 of 241 upstream tasks). To get a leaderboard-scale
+number, vendor more tasks into `bench/tasks/` and re-run.
