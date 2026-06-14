@@ -10,6 +10,27 @@ export interface AgentConfig {
   temperature?: number;
   maxTokens?: number;
   systemPrompt?: string;
+  /**
+   * API key for the model. When set together with `baseUrl`, the coordinator
+   * runs the real tool-use loop against an OpenAI-compatible endpoint. The
+   * agent itself never hardcodes a key; the caller (TUI / SDK / bench) supplies
+   * one from the user's environment.
+   */
+  apiKey?: string;
+  /** OpenAI-compatible base URL, e.g. https://api.deepseek.com/v1 */
+  baseUrl?: string;
+  /** Max tool-use round trips before forcing a final answer. */
+  maxToolRounds?: number;
+  /**
+   * Optional callback invoked before each model call. If it returns a string,
+   * that string is appended as a user message before the call — useful for
+   * progress nudges ("you haven't written any file yet").
+   */
+  onBeforeModelCall?: (ctx: {
+    round: number;
+    toolsCalled: string[];
+    messageCount: number;
+  }) => string | undefined;
 }
 
 export interface AgentEvent {
@@ -22,3 +43,6 @@ export interface ToolCall {
   name: string;
   input: Record<string, unknown>;
 }
+
+// Re-export to satisfy existing imports that reference these symbols.
+export type { Tool, ToolResult };

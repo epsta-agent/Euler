@@ -1,8 +1,0 @@
-{
-  "id": "tb_wordcount",
-  "problem_statement": "Write an executable script 'count.sh' (it must start with a shebang and be runnable as ./count.sh) that reads a file given as $1 and prints the number of non-empty lines in it.",
-  "fail_to_pass": ["test \"$(./count.sh notes.txt)\" = \"3\""],
-  "pass_to_pass": [],
-  "language": "shell",
-  "max_turns": 8
-}

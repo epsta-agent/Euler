@@ -1,8 +1,0 @@
-{
-  "id": "empty_check",
-  "problem_statement": "The `is_blank` function in strings.py should return True for a string that is empty OR contains only whitespace. Currently it only returns True for the empty string. is_blank('   ') should return True but returns False. Fix it.",
-  "fail_to_pass": ["python3 -m pytest test_strings.py -q"],
-  "pass_to_pass": [],
-  "language": "python",
-  "max_turns": 8
-}

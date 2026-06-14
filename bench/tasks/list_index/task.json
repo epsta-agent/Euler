@@ -1,8 +1,0 @@
-{
-  "id": "list_index",
-  "problem_statement": "The `get_item` function in listops.py uses a 1-based index but should use 0-based indexing. get_item(['a','b','c'], 0) should return 'a' but currently returns None (it treats index 0 as 'no item'). Fix it to use standard 0-based indexing and raise IndexError on out-of-range.",
-  "fail_to_pass": ["python3 -m pytest test_listops.py -q"],
-  "pass_to_pass": [],
-  "language": "python",
-  "max_turns": 8
-}

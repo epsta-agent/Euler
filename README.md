@@ -8,7 +8,10 @@ real engineering tasks.
 
 - **`native/`** — Rust workspace of native modules, including the real DAP
   debugger (`native/euler-debug/`).
-- **`src/agent/`** — the agent: providers, tools, coordinator, sessions.
+- **`src/agent/`** — the agent: providers, tools, coordinator, sessions. The
+  coordinator runs a real tool-use loop (model → tool calls → results → model)
+  over an OpenAI-compatible endpoint, so the tools are actually reachable from
+  the TUI.
 - **`src/native/debug-bridge.ts`** — spawns and talks to the `euler-debug`
   binary over line-delimited JSON.
 - **`bench/`** — a self-contained SWE-bench / terminal-bench-style evaluation
@@ -60,33 +63,36 @@ bun test                   # agent tests
 
 ## Benchmark
 
-`bench/` is a SWE-bench / terminal-bench-style harness. Each task is a
-directory under `bench/tasks/<id>/` with a `task.json` (problem statement +
-`fail_to_pass` test commands) and a `repo_template/`.
+`bench/` is a [terminal-bench](https://github.com/harbor-framework/terminal-bench)
+-compatible harness. Each task is `bench/tasks/<id>/` with a real
+`task.yaml` (instruction, parser_name, timeouts) + a pytest evaluator
+(`tests/test_outputs.py`). The agent runs in a fresh copy of the task files;
+a task is resolved iff the evaluator passes.
+
+The harness does **not** hardcode any API key — the caller supplies one:
 
 ```bash
-DEEPSEEK_API_KEY=sk-... bun bench/run.ts --model=deepseek-v4-flash --max-turns=8
+API_KEY=sk-... bun bench/run.ts --base-url=https://api.deepseek.com/v1 --model=deepseek-v4-flash
 ```
 
-### Measured results (this task set)
+Or via the SDK (`bench/sdk.ts`): `runTerminalBench({ apiKey, baseUrl, model })`.
 
-| Model | Resolved | Pass rate |
-|---|---|---|
-| `deepseek-v4-flash` | 6/7 | **85.7%** |
-| `deepseek-v4-pro` | 7/7 | **100%** |
+### Measured result
 
-The flash model lands one task behind the pro model; the gap is a case where
-flash reasoned about the answer but didn't persist the file. Full per-task
-results: `bench/results-deepseek-v4-flash.json`,
-`bench/results-deepseek-v4-pro.json`.
-
-The harness was validated with an oracle driver (applies the known fix → 7/7)
-and a negative control (no fix → 0/2), so the verifier discriminates real
-fixes from no-ops.
+`deepseek-v4-flash` resolves the `count-log-lines` terminal-bench task in 6
+turns (produces a correct, executable `summary.sh` that passes the pytest
+evaluator).
 
 ## Configuration
 
-Set the provider key for the model you want to use:
+The agent never hardcodes an API key. It reads the user's environment via
+`src/agent/model/provider-config.ts`, which maps a provider to the conventional
+env var (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, …). When
+the key is present, the agent runs the full tool-use loop over the provider's
+OpenAI-compatible endpoint; when absent, it falls back to the legacy streaming
+path and prints a hint.
+
+Set the key for whichever provider you use:
 
 - `DEEPSEEK_API_KEY` — DeepSeek (`deepseek-v4-flash`, `deepseek-v4-pro`)
-- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` — others
+- `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, … — others

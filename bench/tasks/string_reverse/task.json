@@ -1,8 +1,0 @@
-{
-  "id": "string_reverse",
-  "problem_statement": "The `reverse` function in strutils.py is broken: it currently returns the string unchanged. It should return the reversed string. For example reverse('abc') should return 'cba', but currently returns 'abc'.",
-  "fail_to_pass": ["python3 -m pytest test_strutils.py -q"],
-  "pass_to_pass": [],
-  "language": "python",
-  "max_turns": 8
-}

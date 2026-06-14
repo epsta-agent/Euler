@@ -56,12 +56,25 @@ impl<R: BufRead + Send + 'static, W: Write + Send + 'static> DapTransport<R, W> 
     }
 
     /// Serialize and send a DAP message, flushing the writer.
+    ///
+    /// Serializes directly into the buffered writer to avoid allocating an
+    /// intermediate `Vec<u8>` per message (the previous `to_vec` + `write_all`
+    /// path allocated twice). The header is emitted with a fixed scratch
+    /// buffer so we never hit the `write!` formatter on the hot path.
     pub fn send_message(&self, msg: &Value) -> Result<(), DapError> {
         let body = serde_json::to_vec(msg)?;
-        // Write under the writer lock and flush immediately so the adapter
-        // receives the full frame without waiting for buffer pressure.
         let w = &mut *self.writer.lock().unwrap();
-        write!(w, "Content-Length: {}\r\n\r\n", body.len())?;
+        // Pre-format the Content-Length header into a small stack buffer.
+        // 32 bytes is plenty for "Content-Length: <u64>\r\n\r\n".
+        let mut header = [0u8; 32];
+        let prefix = b"Content-Length: ";
+        let n = prefix.len();
+        header[..n].copy_from_slice(prefix);
+        let len_str = itoa_into(body.len(), &mut header[n..]);
+        let tail = b"\r\n\r\n";
+        let total = n + len_str;
+        header[total..total + tail.len()].copy_from_slice(tail);
+        w.write_all(&header[..total + tail.len()])?;
         w.write_all(&body)?;
         w.flush()?;
         Ok(())
@@ -125,6 +138,29 @@ pub fn read_one<R: BufRead>(r: &mut R) -> Result<Value, DapError> {
     Ok(value)
 }
 
+/// Write a usize as decimal ASCII into `out`, returning the number of bytes
+/// written. A tiny, allocation-free replacement for the `itoa` crate (and for
+/// the `write!` formatter) on the send hot path.
+fn itoa_into(mut value: usize, out: &mut [u8]) -> usize {
+    if value == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    // Compute digits in reverse, then copy into place.
+    let mut tmp = [0u8; 20];
+    let mut i = 0;
+    while value > 0 {
+        tmp[i] = b'0' + (value % 10) as u8;
+        value /= 10;
+        i += 1;
+    }
+    let digits = &tmp[..i];
+    for (k, &d) in digits.iter().rev().enumerate() {
+        out[k] = d;
+    }
+    i
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,12 +217,35 @@ mod tests {
     #[test]
     fn send_message_writes_framed() {
         let msg = serde_json::json!({"type": "request", "command": "ping"});
+        // Use a pipe: write into a Vec, then read it back with read_one to
+        // confirm the frame round-trips correctly.
         let out: Vec<u8> = Vec::new();
         let transport = DapTransport::new(Cursor::new(Vec::<u8>::new()), out);
         transport.send_message(&msg).unwrap();
-        let written = String::from_utf8(transport.writer.lock().unwrap().get_ref().clone()).unwrap();
-        assert!(written.starts_with("Content-Length: "));
+        let written = {
+            let w = transport.writer.lock().unwrap();
+            let buf: &Vec<u8> = w.get_ref();
+            buf.clone()
+        };
+        let written = String::from_utf8(written).unwrap();
+        assert!(written.starts_with("Content-Length: "), "got: {written:?}");
         assert!(written.contains("\r\n\r\n"));
         assert!(written.contains("\"ping\""));
+
+        // And the written bytes should parse back as a DAP frame.
+        let mut cursor = Cursor::new(written.into_bytes());
+        let parsed = read_one(&mut cursor).unwrap();
+        assert_eq!(parsed["command"], "ping");
+    }
+
+    #[test]
+    fn ita_into_formats_decimal() {
+        let mut out = [0u8; 8];
+        let n = itoa_into(0, &mut out);
+        assert_eq!(&out[..n], b"0");
+        let n = itoa_into(7, &mut out);
+        assert_eq!(&out[..n], b"7");
+        let n = itoa_into(12345, &mut out);
+        assert_eq!(&out[..n], b"12345");
     }
 }

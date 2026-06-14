@@ -1,80 +1,67 @@
-# Euler SWE-bench Harness
+# Terminal-Bench harness
 
-A minimal, self-contained SWE-bench-style evaluation harness for the Euler
-agent. It measures the pass rate of a small model (e.g. **deepseek-flash**) on
-coding tasks, using the agent's **junior-friendly tool surface** (read / write
-/ edit / bash / grep / find) backed by the Rust-native debugger.
+An evaluation harness compatible with the
+[terminal-bench](https://github.com/harbor-framework/terminal-bench) task
+schema. It runs the Euler agent (real tool-use loop + junior-friendly tools)
+against terminal-bench tasks and reports the pass rate.
 
-## Layout
+The harness does **not** hardcode any API key. The caller supplies one.
+
+## Task format (matches upstream terminal-bench)
 
 ```
-bench/
-├── harness.ts     # task loading, workspace prep, test execution, summary
-├── drivers.ts     # provider-agnostic agent driver (OpenAI-compatible tool loop)
-├── run.ts         # CLI entrypoint
-├── tasks/         # one dir per task: task.json + repo_template/
-└── report.json    # written after a run (per-task results + aggregate)
+bench/tasks/<id>/
+├── task.yaml          # instruction, parser_name, timeouts, metadata
+├── tests/
+│   └── test_outputs.py   # pytest evaluator (the PASS criterion)
+└── <input files>      # data the agent works on (e.g. access_log)
 ```
 
-## Task format
+`task.yaml` fields: `instruction` (shown to the agent), `parser_name` (`pytest`),
+`max_agent_timeout_sec`, `max_test_timeout_sec`, `difficulty`, `category`, `tags`.
 
-Each task is a directory `bench/tasks/<id>/` with:
+Evaluation, like upstream: the agent operates in a fresh copy of the task files;
+then `python3 -m pytest tests/test_outputs.py` decides resolved/not.
 
-- `task.json`:
-  ```json
-  {
-    "id": "string_reverse",
-    "problem_statement": "The reverse() function returns the string unchanged; it should reverse it.",
-    "fail_to_pass": ["python3 -m pytest test_strutils.py -q"],
-    "pass_to_pass": [],
-    "language": "python",
-    "max_turns": 8
-  }
-  ```
-- `repo_template/`: a writable copy of the project containing the bug + the
-  failing test. The harness copies this into a fresh work dir per run.
-
-`fail_to_pass` commands must FAIL on the buggy template and PASS after the
-model's fix. `pass_to_pass` (optional) must keep passing (regression guard).
-
-## Running
+## Run
 
 ```bash
-# Set the provider key (deepseek-flash uses the OpenAI-compatible API):
-export DEEPSEEK_API_KEY=sk-...
-
-# Run all tasks:
-bun bench/run.ts
-
-# Run a single task:
-bun bench/run.ts --task=string_reverse
-
-# Tune turns / model:
-bun bench/run.ts --max-turns=12 --model=deepseek-chat
+# The caller picks the env var; the agent never assumes one.
+API_KEY=sk-... bun bench/run.ts \
+  --base-url=https://api.deepseek.com/v1 \
+  --model=deepseek-v4-flash \
+  --max-tool-rounds=12
 ```
 
-Supported providers (`--provider=`): `deepseek` (default), `openai`,
-`anthropic`, `openrouter`. Each reads its key from the corresponding env var.
+## SDK
 
-## What it measures
+```ts
+import { runTerminalBench } from './bench/sdk';
 
-For each task, the harness:
+const report = await runTerminalBench({
+  apiKey: process.env.MY_KEY!,      // caller supplies the key
+  baseUrl: 'https://api.deepseek.com/v1',
+  model: 'deepseek-v4-flash',
+  taskDir: './bench/tasks',
+  maxToolRounds: 12,
+});
+console.log(report.summary);        // { total, resolved, passRate }
+```
 
-1. Copies `repo_template/` to a fresh `bench/work/<id>/repo/`.
-2. Runs the agent tool loop: the model calls read/edit/bash/... to fix the bug.
-3. Runs every `fail_to_pass` command; a task is **resolved** iff all pass (and
-   all `pass_to_pass` keep passing).
-4. Prints a summary and writes `bench/report.json`.
+## What it exercises
 
-## Adding real SWE-bench tasks
+The SDK wires the real `AgentCoordinator` tool-use loop (the same one the TUI
+uses) to the junior-friendly tool surface — `read`/`write`/`edit`/`bash`/
+`grep`/`find` — so the benchmark measures the actual agent. Tool input/output is
+exactly what the TUI produces.
 
-Drop a task directory under `bench/tasks/`. For official SWE-bench instances,
-materialize the repo at `base_commit`, copy in the test patch, and set
-`fail_to_pass` / `pass_to_pass` from the instance's `FAIL_TO_PASS` /
-`PASS_TO_PASS` fields.
+## Adding tasks
+
+Drop a directory under `bench/tasks/` with a `task.yaml` + `tests/test_outputs.py`
++ any input files. See `bench/tasks/count-log-lines/` for a self-contained
+example (no Docker).
 
 ## Validated
 
-The harness was validated with an oracle driver (applies the known fix →
-2/2 resolved) and a negative control (no fix → 0/2 resolved), proving the
-verifier discriminates real fixes from no-ops.
+- Oracle runner (applies the known fix) → 1/1 resolved.
+- Real model run: `deepseek-v4-flash` resolves `count-log-lines` in 6 turns.

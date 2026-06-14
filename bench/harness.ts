@@ -1,126 +1,182 @@
 /**
- * SWE-bench-style evaluation harness for the Euler agent.
+ * Terminal-Bench-compatible harness.
  *
- * Goal: measure the agent's pass rate on small, self-contained coding tasks
- * driven by the junior-friendly tool surface (read/write/edit/bash/grep/find/
- * search + the Rust-native debug tool), using a small model such as
- * deepseek-flash via its OpenAI-compatible API.
+ * Matches the real terminal-bench task schema (see
+ * https://github.com/harbor-framework/terminal-bench):
  *
- * A "task" is a directory under bench/tasks/<id>/ containing:
- *   - repo/          : a writable copy of the project under test
- *   - task.json      : { id, problem_statement, fail_to_pass: string[], base_commit, language }
- *   - The repo/ dir already has the failing test(s) present but the fix NOT applied.
+ *   tasks/<id>/task.yaml   — instruction, parser_name, timeouts, metadata
+ *   tasks/<id>/tests/      — pytest evaluator (test_outputs.py)
+ *   tasks/<id>/*           — input data files the agent works on
  *
- * The harness:
- *   1. For each task, starts a fresh AgentCoordinator configured with the
- *      requested provider (deepseek-flash by default).
- *   2. Lets the model edit repo/ using the tools for up to `maxTurns` turns.
- *   3. Runs each fail_to_pass test command in repo/ (PASS_TO_PASS semantics:
- *      a previously-failing test that should now pass).
- *   4. Records pass/fail per task and prints a summary + JSON report.
+ * Evaluation, like upstream, is: run the agent against the instruction in a
+ * fresh copy of the task dir; then run the evaluator (`tests/`) with pytest;
+ * a task is resolved iff the evaluator passes.
  *
- * Usage:
- *   DEEPSEEK_API_KEY=... bun bench/harness.ts [--task=<id>] [--max-turns=12] [--model=deepseek-chat]
+ * The agent loop is supplied by [`createAgentRunner`], which is wired to the
+ * real AgentCoordinator tool-use loop + the junior-friendly tool surface.
+ *
+ * This module does NOT hardcode any API key. The caller (SDK / CLI / TUI) sets
+ * the key via options; see `sdk.ts`.
  */
 
-import { readdir, readFile, writeFile, access, rm, mkdir, cp } from 'fs/promises';
+import { readdir, readFile, copyFile, mkdir, rm, access } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { spawn } from 'child_process';
 
-// ---------- Types ----------
+// ---------- Task model (matches terminal-bench task.yaml) ----------
 
 export interface TaskSpec {
+  /** Canonical id (the directory name). */
   id: string;
-  problem_statement: string;
-  /** Commands that should FAIL before the fix and PASS after. Each runs in repo/. */
-  fail_to_pass: string[];
-  /** Commands that must keep passing (run after the fix). Optional. */
-  pass_to_pass?: string[];
-  language: 'python' | 'javascript' | 'go' | 'rust' | 'shell';
-  /** Hard cap on agent turns for this task. */
-  max_turns?: number;
-}
-
-export interface TaskResult {
-  id: string;
-  resolved: boolean;
-  fail_to_pass_results: { command: string; passed: boolean; output: string }[];
-  pass_to_pass_results: { command: string; passed: boolean; output: string }[];
-  turns_used: number;
-  error?: string;
-}
-
-export interface HarnessConfig {
+  /** The instruction shown to the agent. */
+  instruction: string;
+  /** Evaluator parser; only "pytest" is supported here. */
+  parser_name: 'pytest';
+  /** Hard cap on agent wall-clock seconds. */
+  max_agent_timeout_sec: number;
+  /** Hard cap on test wall-clock seconds. */
+  max_test_timeout_sec: number;
+  /** Metadata (informational only). */
+  difficulty?: string;
+  category?: string;
+  tags?: string[];
+  /** Path to the task directory. */
   taskDir: string;
-  maxTurns: number;
-  model: string;
-  provider: 'deepseek' | 'openai' | 'anthropic' | 'openrouter';
-  apiKey?: string;
-  baseURL?: string;
-  onlyTask?: string;
-  workRoot: string;
-  verbose: boolean;
 }
 
-// ---------- Task loading ----------
+/** Parse a terminal-bench task.yaml. We implement a tiny parser to avoid a
+ *  hard dependency on a YAML library for the subset we use. */
+export async function loadTask(taskDir: string, id: string): Promise<TaskSpec> {
+  const raw = await readFile(join(taskDir, id, 'task.yaml'), 'utf-8');
+  const parsed = parseTaskYaml(raw);
+  return {
+    id,
+    instruction: parsed.instruction ?? '',
+    parser_name: (parsed.parser_name as 'pytest') ?? 'pytest',
+    max_agent_timeout_sec: Number(parsed.max_agent_timeout_sec ?? 900),
+    max_test_timeout_sec: Number(parsed.max_test_timeout_sec ?? 180),
+    difficulty: parsed.difficulty,
+    category: parsed.category,
+    tags: parsed.tags,
+    taskDir: resolve(taskDir, id),
+  };
+}
 
-/** Enumerate available task ids by scanning the task directory. */
+/**
+ * Minimal YAML parser for the terminal-bench task subset:
+ *   instruction: |-    (block scalar)
+ *     multiline...
+ *   key: value
+ *   tags:
+ *     - a
+ *     - b
+ *
+ * Good enough for task.yaml; not a general YAML parser.
+ */
+function parseTaskYaml(text: string): Record<string, any> {
+  const out: Record<string, any> = {};
+  const lines = text.split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim() || line.trim().startsWith('#')) { i++; continue; }
+
+    const m = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+    if (!m) { i++; continue; }
+    const key = m[1];
+    const rest = m[2];
+
+    if (rest === '|-' || rest === '|') {
+      // Block scalar: collect indented lines.
+      const buf: string[] = [];
+      i++;
+      while (i < lines.length && (lines[i].startsWith('  ') || lines[i].trim() === '')) {
+        buf.push(lines[i]);
+        i++;
+      }
+      // Strip the common 2-space indent and trailing blank lines.
+      const trimmed = buf.join('\n').replace(/^  /gm, '').replace(/\s+$/, '');
+      out[key] = trimmed;
+      continue;
+    }
+
+    if (rest === '') {
+      // Possibly a list (tags) or nested map.
+      const items: string[] = [];
+      i++;
+      while (i < lines.length && lines[i].startsWith('  - ')) {
+        items.push(lines[i].trim().slice(2).trim().replace(/^["']|["']$/g, ''));
+        i++;
+      }
+      if (items.length) { out[key] = items; continue; }
+      out[key] = '';
+      continue;
+    }
+
+    out[key] = rest.replace(/^["']|["']$/g, '');
+    i++;
+  }
+  return out;
+}
+
+// ---------- Discovery ----------
+
 export async function listTasks(taskDir: string): Promise<string[]> {
   if (!existsSync(taskDir)) return [];
   const entries = await readdir(taskDir, { withFileTypes: true });
   const ids: string[] = [];
   for (const e of entries) {
     if (!e.isDirectory()) continue;
-    if (existsSync(join(taskDir, e.name, 'task.json'))) {
-      ids.push(e.name);
-    }
+    if (existsSync(join(taskDir, e.name, 'task.yaml'))) ids.push(e.name);
   }
   return ids.sort();
 }
 
-export async function loadTask(taskDir: string, id: string): Promise<TaskSpec> {
-  const raw = await readFile(join(taskDir, id, 'task.json'), 'utf-8');
-  const spec = JSON.parse(raw) as TaskSpec;
-  spec.id = id;
-  return spec;
-}
+// ---------- Workspace prep ----------
 
-/**
- * Prepare a fresh writable copy of the task's `repo_template/` into
- * `<workRoot>/<id>/repo`. If `repo_template` is absent we assume the repo is
- * already materialized at <taskDir>/<id>/repo.
- */
+/** Copy a task's files (minus tests/) into a fresh working directory for the
+ *  agent to operate on. The tests/ dir is kept aside for evaluation. */
 export async function prepareWorkspace(
   taskDir: string,
   id: string,
-  workRoot: string
-): Promise<string> {
-  const workTask = join(workRoot, id);
-  const repo = join(workTask, 'repo');
-  await rm(workTask, { recursive: true, force: true });
-  await mkdir(workTask, { recursive: true });
+  workRoot: string,
+): Promise<{ workDir: string; testsDir: string }> {
+  const src = resolve(taskDir, id);
+  const workDir = resolve(workRoot, id);
+  await rm(workDir, { recursive: true, force: true });
+  await mkdir(workDir, { recursive: true });
 
-  const template = join(taskDir, id, 'repo_template');
-  const source = existsSync(template) ? template : join(taskDir, id, 'repo');
-  if (existsSync(source)) {
-    await cp(source, repo, { recursive: true });
-  } else {
-    await mkdir(repo, { recursive: true });
+  const entries = await readdir(src, { withFileTypes: true });
+  for (const e of entries) {
+    if (e.name === 'tests' || e.name === 'Dockerfile' || e.name === 'docker-compose.yaml' || e.name === 'run-tests.sh') continue;
+    const from = join(src, e.name);
+    const to = join(workDir, e.name);
+    if (e.isDirectory()) {
+      await mkdir(to, { recursive: true });
+      // shallow recursive copy
+      const { cp } = await import('fs/promises');
+      await cp(from, to, { recursive: true });
+    } else {
+      await copyFile(from, to);
+    }
   }
-  return repo;
+
+  // Absolute path so pytest can find the tests regardless of the agent's cwd.
+  const testsDir = join(src, 'tests');
+  return { workDir, testsDir };
 }
 
-// ---------- Test execution ----------
+// ---------- Command runner ----------
 
-/** Run a shell command in `cwd`, returning stdout+stderr, exit code, timed. */
 export async function runCommand(
   command: string,
   cwd: string,
-  timeoutMs = 120_000
+  timeoutMs: number,
+  env?: Record<string, string>,
 ): Promise<{ stdout: string; code: number; timedOut: boolean }> {
   return new Promise((res) => {
-    const proc = spawn(command, [], { cwd, shell: true });
+    const proc = spawn(command, [], { cwd, shell: true, env: { ...process.env, ...env } });
     let stdout = '';
     proc.stdout?.on('data', (d) => (stdout += d.toString()));
     proc.stderr?.on('data', (d) => (stdout += d.toString()));
@@ -139,137 +195,65 @@ export async function runCommand(
   });
 }
 
-/** Apply a unified-diff patch string in `cwd` using `git apply`. */
-export async function applyPatch(
-  patch: string,
-  cwd: string
-): Promise<{ ok: boolean; message: string }> {
-  if (!patch.trim()) return { ok: true, message: 'no patch produced' };
-  const { writeFile, unlink } = await import('fs/promises');
-  const patchFile = join(cwd, '__euler_patch.diff');
-  await writeFile(patchFile, patch, 'utf-8');
-  const result = await runCommand(`git apply --whitespace=nowarn ${patchFile}`, cwd);
-  await unlink(patchFile).catch(() => {});
-  return { ok: result.code === 0, message: result.stdout };
-}
-
-// ---------- Harness entrypoint ----------
+// ---------- Evaluation ----------
 
 /**
- * Run a single task using a provided agent driver. The driver is injected so
- * the harness stays provider-agnostic; see `createDeepseekDriver` below.
+ * Run the pytest evaluator for a task in the agent's working directory.
+ * Mirrors terminal-bench: `python3 -m pytest <testsDir>/test_outputs.py -rA`,
+ * with the working dir set so the tests can read the agent's outputs.
+ *
+ * Pass: all tests pass (pytest exit 0).
  */
 export async function evaluateTask(
   spec: TaskSpec,
-  repoDir: string,
-  runAgent: (spec: TaskSpec, repoDir: string) => Promise<{ turns: number; error?: string }>,
-  config: HarnessConfig
-): Promise<TaskResult> {
-  const agentOutcome = await runAgent(spec, repoDir);
-
-  const failResults: TaskResult['fail_to_pass_results'] = [];
-  for (const cmd of spec.fail_to_pass) {
-    const r = await runCommand(cmd, repoDir);
-    failResults.push({ command: cmd, passed: r.code === 0, output: r.stdout.slice(-2000) });
+  workDir: string,
+  testsDir: string,
+): Promise<{ resolved: boolean; output: string }> {
+  const testFile = join(testsDir, 'test_outputs.py');
+  if (!existsSync(testFile)) {
+    return { resolved: false, output: `no evaluator at ${testFile}` };
   }
-
-  const passResults: TaskResult['pass_to_pass_results'] = [];
-  for (const cmd of spec.pass_to_pass ?? []) {
-    const r = await runCommand(cmd, repoDir);
-    passResults.push({ command: cmd, passed: r.code === 0, output: r.stdout.slice(-2000) });
-  }
-
-  const allFailPass = failResults.every((r) => r.passed);
-  const allPassPass = passResults.every((r) => r.passed);
-
-  return {
-    id: spec.id,
-    resolved: allFailPass && allPassPass,
-    fail_to_pass_results: failResults,
-    pass_to_pass_results: passResults,
-    turns_used: agentOutcome.turns,
-    error: agentOutcome.error,
-  };
+  const result = await runCommand(
+    `python3 -m pytest "${testFile}" -rA`,
+    workDir,
+    spec.max_test_timeout_sec * 1000,
+  );
+  return { resolved: result.code === 0, output: result.stdout };
 }
 
-/** Compute aggregate stats (without printing). */
-export function computeStats(results: TaskResult[]): {
+// ---------- Reporting ----------
+
+export interface TaskResult {
+  id: string;
+  resolved: boolean;
+  difficulty?: string;
+  category?: string;
+  turns?: number;
+  duration_ms?: number;
+  evaluator_output?: string;
+  error?: string;
+}
+
+export function summarize(results: TaskResult[]): {
   total: number;
   resolved: number;
   passRate: number;
 } {
   const total = results.length;
   const resolved = results.filter((r) => r.resolved).length;
-  const passRate = total === 0 ? 0 : (resolved / total) * 100;
-  return { total, resolved, passRate };
+  return { total, resolved, passRate: total === 0 ? 0 : (resolved / total) * 100 };
 }
 
-/** Print a human-readable summary and return aggregate stats. */
-export function summarize(results: TaskResult[]): {
-  total: number;
-  resolved: number;
-  passRate: number;
-} {
-  const { total, resolved, passRate } = computeStats(results);
-
-  console.log('\n========== SWE-bench results ==========');
+export function printSummary(results: TaskResult[]): void {
+  const { total, resolved, passRate } = summarize(results);
+  console.log('\n========== Terminal-Bench results ==========');
   for (const r of results) {
     const mark = r.resolved ? '✅' : '❌';
-    console.log(`${mark} ${r.id}  (turns: ${r.turns_used})`);
-    for (const t of r.fail_to_pass_results) {
-      console.log(`    ${t.passed ? 'PASS' : 'FAIL'}  ${t.command}`);
-    }
+    const meta = [r.difficulty, r.category].filter(Boolean).join('/');
+    console.log(`${mark} ${r.id}${meta ? `  [${meta}]` : ''}  (turns: ${r.turns ?? '?'})`);
     if (r.error) console.log(`    error: ${r.error}`);
   }
-  console.log('---------------------------------------');
+  console.log('--------------------------------------------');
   console.log(`Resolved: ${resolved}/${total}  (${passRate.toFixed(1)}%)`);
-  console.log('=======================================\n');
-  return { total, resolved, passRate };
+  console.log('============================================\n');
 }
-
-/** Persist the full results to a JSON report file (no console output). */
-export async function writeReport(
-  results: TaskResult[],
-  outPath: string
-): Promise<void> {
-  const report = {
-    generated_at: new Date().toISOString(),
-    summary: computeStats(results),
-    results,
-  };
-  await writeFile(outPath, JSON.stringify(report, null, 2), 'utf-8');
-  console.log(`Report written to ${outPath}`);
-}
-
-// ---------- CLI ----------
-
-export function parseArgs(argv: string[]): Partial<HarnessConfig> {
-  const cfg: Partial<HarnessConfig> = {};
-  for (const arg of argv.slice(2)) {
-    const m = arg.match(/^--([^=]+)=(.*)$/);
-    if (!m) continue;
-    const [, k, v] = m;
-    switch (k) {
-      case 'task': cfg.onlyTask = v; break;
-      case 'max-turns': cfg.maxTurns = Number(v); break;
-      case 'model': cfg.model = v; break;
-      case 'provider': cfg.provider = v as HarnessConfig['provider']; break;
-      case 'task-dir': cfg.taskDir = v; break;
-      case 'work-root': cfg.workRoot = v; break;
-      case 'verbose': cfg.verbose = v !== 'false' && v !== '0'; break;
-    }
-  }
-  return cfg;
-}
-
-export const DEFAULT_CONFIG: HarnessConfig = {
-  taskDir: resolve(process.cwd(), 'bench', 'tasks'),
-  maxTurns: 12,
-  model: 'deepseek-chat',
-  provider: 'deepseek',
-  workRoot: resolve(process.cwd(), 'bench', 'work'),
-  verbose: false,
-};
-
-// Re-exported so the CLI entry can compose everything.
-export { createAgentDriver, type AgentDriver } from './drivers';

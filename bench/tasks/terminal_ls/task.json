@@ -1,8 +1,0 @@
-{
-  "id": "terminal_ls",
-  "problem_statement": "There is a log file at 'app.log' containing lines like 'LEVEL message'. Write a script 'analyze.sh' (chmod +x) that prints ONLY the count of lines whose level is 'ERROR'. The verification runs ./analyze.sh and checks it outputs the correct number.",
-  "fail_to_pass": ["test \"$(./analyze.sh)\" = \"2\""],
-  "pass_to_pass": [],
-  "language": "shell",
-  "max_turns": 8
-}

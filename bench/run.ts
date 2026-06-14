@@ -1,91 +1,49 @@
 #!/usr/bin/env bun
 /**
- * SWE-bench harness CLI entrypoint.
+ * Terminal-Bench CLI.
  *
- *   DEEPSEEK_API_KEY=... bun bench/run.ts [--task=<id>] [--max-turns=12] [--model=deepseek-chat]
+ * Usage:
+ *   API_KEY=sk-... bun bench/run.ts --base-url=https://api.deepseek.com/v1 --model=deepseek-v4-flash
+ *
+ * The key comes from $API_KEY (or --api-key). The agent never picks the env var
+ * name for you — you decide where the key lives.
  */
 
-import {
-  DEFAULT_CONFIG,
-  evaluateTask,
-  listTasks,
-  loadTask,
-  parseArgs,
-  prepareWorkspace,
-  summarize,
-  writeReport,
-} from './harness';
-import { createAgentDriver, resolveProvider } from './drivers';
+import { runTerminalBench, writeReport } from './sdk';
 
-async function main() {
-  const args = parseArgs(process.argv);
-  const config = { ...DEFAULT_CONFIG, ...args } as typeof DEFAULT_CONFIG;
-
-  const { baseURL, apiKey } = resolveProvider({
-    provider: config.provider,
-    apiKey: config.apiKey,
-    baseURL: config.baseURL,
-    model: config.model,
-  });
-
-  if (!apiKey) {
-    console.error(
-      `No API key found for provider '${config.provider}'. Set $${providerKeyEnv(config.provider)} or pass --api-key.`
-    );
-    process.exit(2);
-  }
-
-  const ids = await listTasks(config.taskDir);
-  let chosen = ids;
-  if (config.onlyTask) {
-    chosen = ids.filter((id) => id === config.onlyTask);
-    if (chosen.length === 0) {
-      console.error(`Task '${config.onlyTask}' not found in ${config.taskDir}. Available: ${ids.join(', ') || '(none)'}`);
-      process.exit(2);
-    }
-  }
-  if (chosen.length === 0) {
-    console.error(`No tasks found in ${config.taskDir}. Add task dirs with a task.json.`);
-    process.exit(2);
-  }
-
-  console.log(`Provider: ${config.provider} (${config.model})`);
-  console.log(`Tasks: ${chosen.join(', ')}`);
-  console.log(`Max turns: ${config.maxTurns}`);
-  console.log('');
-
-  const driver = createAgentDriver({
-    baseURL,
-    apiKey,
-    model: config.model,
-    maxTurns: config.maxTurns,
-    verbose: config.verbose,
-  });
-
-  const results = [];
-  for (const id of chosen) {
-    const spec = await loadTask(config.taskDir, id);
-    console.log(`▶ ${id}`);
-    const repoDir = await prepareWorkspace(config.taskDir, id, config.workRoot);
-    const result = await evaluateTask(spec, repoDir, driver, config);
-    results.push(result);
-    console.log(`  → ${result.resolved ? 'RESOLVED' : 'NOT resolved'}`);
-  }
-
-  summarize(results);
-  await writeReport(results, './bench/report.json');
+function arg(name: string): string | undefined {
+  const found = process.argv.find((a) => a.startsWith(`--${name}=`));
+  return found ? found.slice(name.length + 3) : undefined;
 }
 
-function providerKeyEnv(provider: string): string {
-  return {
-    deepseek: 'DEEPSEEK_API_KEY',
-    openai: 'OPENAI_API_KEY',
-    anthropic: 'ANTHROPIC_API_KEY',
-    openrouter: 'OPENROUTER_API_KEY',
-  }[provider] ?? 'API_KEY';
+async function main() {
+  const apiKey = arg('api-key') ?? process.env.API_KEY;
+  const baseUrl = arg('base-url') ?? 'https://api.deepseek.com/v1';
+  const model = arg('model') ?? 'deepseek-chat';
+  const taskDir = arg('task-dir');
+  const only = arg('only')?.split(',').map((s) => s.trim());
+  const verbose = arg('verbose') === 'true';
+  const maxToolRounds = arg('max-tool-rounds') ? Number(arg('max-tool-rounds')) : undefined;
+
+  if (!apiKey) {
+    console.error('No API key. Set $API_KEY or pass --api-key=... (the agent never hardcodes one).');
+    process.exit(2);
+  }
+
+  const report = await runTerminalBench({
+    apiKey,
+    baseUrl,
+    model,
+    taskDir,
+    only,
+    verbose,
+    maxToolRounds,
+  });
+
+  await writeReport(report, './bench/report.json');
 }
 
 main().catch((err) => {
-  console.error('Harness failed:', err);
+  console.error('Bench failed:', err);
   process.exit(1);
 });

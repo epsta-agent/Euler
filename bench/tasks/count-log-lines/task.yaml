@@ -1,0 +1,21 @@
+# Terminal-Bench-compatible task. Schema matches
+# https://github.com/harbor-framework/terminal-bench task.yaml.
+# (Self-contained variant: no Docker; paths are relative to the task work dir,
+#  which upstream maps to /app.)
+instruction: |-
+  There is a web server access log at "access_log" in the current directory.
+  Write an executable shell script "summary.sh" in the current directory that,
+  when executed from the current directory, prints exactly three lines to stdout:
+    1. "Total requests: <N>"  — the total number of non-empty lines in the log
+    2. "404 errors: <N>"       — the number of lines containing " 404 "
+    3. "Unique IPs: <N>"       — the number of distinct client IP addresses
+                                 (the first whitespace-separated token per line)
+  The script must be executable (./summary.sh runs). Print only those three lines.
+parser_name: pytest
+max_agent_timeout_sec: 300
+max_test_timeout_sec: 60
+difficulty: easy
+category: file-operations
+tags:
+  - shell
+  - text-processing

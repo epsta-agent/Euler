@@ -1,8 +1,0 @@
-{
-  "id": "off_by_one",
-  "problem_statement": "The `sum_range` function in calc.py has an off-by-one bug. It should sum all integers from `lo` to `hi` INCLUSIVE, but currently excludes `hi`. For example sum_range(1, 3) should return 6 (1+2+3) but returns 3 (1+2).",
-  "fail_to_pass": ["python3 -m pytest test_calc.py -q"],
-  "pass_to_pass": [],
-  "language": "python",
-  "max_turns": 8
-}

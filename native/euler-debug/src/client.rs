@@ -173,7 +173,7 @@ impl DebugClient {
             seq: AtomicU64::new(1),
             adapter_kind: spec.kind,
             state: DebugState::Idle,
-            scopes: HashMap::new(),
+            scopes: HashMap::with_capacity(8),
         };
 
         client.initialize()?;
@@ -189,7 +189,9 @@ impl DebugClient {
     }
 
     fn next_seq(&self) -> i64 {
-        self.seq.fetch_add(1, Ordering::SeqCst) as i64
+        // Single-threaded access (the main loop); Relaxed is sufficient and
+        // avoids the fence SeqCst would impose on every request.
+        self.seq.fetch_add(1, Ordering::Relaxed) as i64
     }
 
     // -- low-level request/response machinery --------------------------------

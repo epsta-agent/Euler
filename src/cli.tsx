@@ -354,12 +354,28 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const { resolveProviderCredentials } = await import('./agent/model/provider-config');
+  const { apiKey, baseUrl } = resolveProviderCredentials({
+    provider: selectedProvider,
+  });
+
+  if (!apiKey) {
+    const ep = (await import('./agent/model/provider-config')).getProviderEndpoint(selectedProvider);
+    console.error(
+      `\nNo API key found for provider '${selectedProvider}'.` +
+      (ep ? ` Set ${ep.keyEnv} in your environment.` : '') +
+      `\nYou can still chat, but the agent will not be able to use tools or call the model over the OpenAI-compatible endpoint.\n`,
+    );
+  }
+
   const coordinator = new AgentCoordinator(provider, tools, {
     provider: selectedProvider,
     model: selectedModel,
     temperature: config.temperature,
     maxTokens: config.maxTokens,
     systemPrompt: config.systemPrompt || 'You are Euler, a helpful coding assistant.',
+    apiKey,
+    baseUrl,
   });
 
   // Load session if requested
