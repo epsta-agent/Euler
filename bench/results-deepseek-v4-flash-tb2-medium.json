@@ -1,0 +1,47 @@
+{
+  "model": "deepseek-v4-flash",
+  "benchmark": "terminal-bench-2",
+  "results": [
+    {
+      "id": "nginx-request-logging",
+      "resolved": true,
+      "difficulty": "medium",
+      "category": "system-administration",
+      "turns": 13,
+      "duration_ms": 51605,
+      "verifier_output": "test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-8.4.1, pluggy-1.6.0 -- /root/.cache/uv/archive-v0/hKBS7SWbGvdTSRsvXvgRw/bin/python\ncachedir: .pytest_cache\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollecting ... collected 8 items\n\n../tests/test_outputs.py::test_nginx_installed PASSED                    [ 12%]\n../tests/test_outputs.py::test_nginx_running PASSED                      [ 25%]\n../tests/test_outputs.py::test_index_page_content PASSED                 [ 37%]\n../tests/test_outputs.py::test_custom_404_page PASSED                    [ 50%]\n../tests/test_outputs.py::test_nginx_config_syntax PASSED                [ 62%]\n../tests/test_outputs.py::test_nginx_config_settings PASSED              [ 75%]\n../tests/test_outputs.py::test_log_file_creation PASSED                  [ 87%]\n../tests/test_outputs.py::test_log_file_format PASSED                    [100%]\n\n=============================== warnings summary ===============================\n../root/.cache/uv/archive-v0/hKBS7SWbGvdTSRsvXvgRw/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /root/.cache/uv/archive-v0/hKBS7SWbGvdTSRsvXvgRw/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-vfmw2f4f'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n==================================== PASSES ====================================\n=========================== short test summary info ============================\nPASSED ../tests/test_outputs.py::test_nginx_installed\nPASSED ../tests/test_outputs.py::test_nginx_running\nPASSED ../tests/test_outputs.py::test_index_page_content\nPASSED ../tests/test_outputs.py::test_custom_404_page\nPASSED ../tests/test_outputs.py::test_nginx_config_syntax\nPASSED ../tests/test_outputs.py::test_nginx_config_settings\nPASSED ../tests/test_outputs.py::test_log_file_creation\nPASSED ../tests/test_outputs.py::test_log_file_format\n========================= 8 passed, 1 warning in 2.15s =========================\n\n(reward=1)"
+    },
+    {
+      "id": "password-recovery",
+      "resolved": true,
+      "difficulty": "hard",
+      "category": "security",
+      "turns": 17,
+      "duration_ms": 103547,
+      "verifier_output": "test session starts ==============================\nplatform linux -- Python 3.13.9, pytest-8.4.1, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 2 items\n\n../tests/test_outputs.py ..                                              [100%]\n\n=============================== warnings summary ===============================\n../root/.cache/uv/archive-v0/-e-zVkxv23gsWOY5M128o/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /root/.cache/uv/archive-v0/-e-zVkxv23gsWOY5M128o/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-owq2ifdc'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n==================================== PASSES ====================================\n=========================== short test summary info ============================\nPASSED ../tests/test_outputs.py::test_recovery_file_exists\nPASSED ../tests/test_outputs.py::test_password_match\n========================= 2 passed, 1 warning in 0.03s =========================\n\n(reward=1)"
+    },
+    {
+      "id": "regex-log",
+      "resolved": true,
+      "difficulty": "medium",
+      "category": "data-processing",
+      "turns": 17,
+      "duration_ms": 199976,
+      "verifier_output": "test session starts ==============================\nplatform linux -- Python 3.13.9, pytest-8.4.1, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 1 item\n\n../tests/test_outputs.py .                                               [100%]\n\n=============================== warnings summary ===============================\n../root/.cache/uv/archive-v0/bUgJH0ktpE7eHHfOH0OMN/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /root/.cache/uv/archive-v0/bUgJH0ktpE7eHHfOH0OMN/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-kenbjftb'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n==================================== PASSES ====================================\n=========================== short test summary info ============================\nPASSED ../tests/test_outputs.py::test_regex_matches_dates\n========================= 1 passed, 1 warning in 0.06s =========================\n\n(reward=1)"
+    },
+    {
+      "id": "sqlite-db-truncate",
+      "resolved": true,
+      "difficulty": "medium",
+      "category": "debugging",
+      "turns": 16,
+      "duration_ms": 280916,
+      "verifier_output": "test session starts ==============================\nplatform linux -- Python 3.13.14, pytest-8.4.1, pluggy-1.6.0\nrootdir: /tests\nplugins: json-ctrf-0.3.5\ncollected 1 item\n\n../tests/test_outputs.py .                                               [100%]\n\n=============================== warnings summary ===============================\n../root/.cache/uv/archive-v0/RuEYno-dmX2r3f94w4U0Z/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /root/.cache/uv/archive-v0/RuEYno-dmX2r3f94w4U0Z/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /tests/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/tests/pytest-cache-files-nkv3olwp'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n==================================== PASSES ====================================\n=========================== short test summary info ============================\nPASSED ../tests/test_outputs.py::test_json_data\n========================= 1 passed, 1 warning in 0.03s =========================\n\n(reward=1)"
+    }
+  ],
+  "summary": {
+    "total": 4,
+    "resolved": 4,
+    "passRate": 100
+  }
+}
