@@ -20,6 +20,7 @@
 import type { ProviderInterface, Message } from '../model/types';
 import type { Tool, ToolResult } from '../tool/types';
 import type { AgentConfig, AgentEvent } from './types';
+import { ConversationManager, type ContextMessage } from './context';
 
 /** Maximum tool-use round trips before we force a final answer. */
 const DEFAULT_MAX_TOOL_ROUNDS = 24;
@@ -28,12 +29,20 @@ const DEFAULT_MAX_TOOL_ROUNDS = 24;
 const COMPLETION_TIMEOUT_MS = 120_000;
 
 /**
- * Default output cap. Terminal-bench tasks routinely require `write()` calls
- * whose `content` argument is a full source file — 4096 tokens truncates
- * mid-file for anything non-trivial, producing invalid tool-call JSON that
- * silently fails the task. 8192 fits most single-file deliverables.
+ * Default output cap for a FINAL answer (no tools in play). The model only
+ * needs room for a summary here, so this stays modest.
  */
 const DEFAULT_MAX_TOKENS = 8192;
+
+/**
+ * Output cap for a TOOL-CALL turn. Terminal-bench tasks routinely require
+ * `write()` calls whose `content` argument is a full source file — 8192 tokens
+ * truncates mid-file for anything non-trivial, producing invalid tool-call
+ * JSON that silently fails the task. 16384 fits substantial single-file
+ * deliverables (COBOL→Python rewrites, multi-hundred-line configs) without the
+ * truncation death-spiral.
+ */
+const TOOL_TURN_MAX_TOKENS = 16384;
 
 /** How many times to retry a model request that fails with a transient error. */
 const MAX_RETRIES = 3;
@@ -131,10 +140,16 @@ export class AgentCoordinator {
       },
     }));
 
-    const messages: ChatMessage[] = [];
+    // The conversation manager owns the running message list and applies two
+    // safety policies before each model call: per-result truncation (a verbose
+    // `apt-get install` log no longer eats the whole window) and token-aware
+    // compaction (oldest tool turns get folded into a recap once the estimate
+    // crosses ~96k tokens). Without these, long terminal-bench tasks exhaust
+    // the context window and start producing truncated tool-call JSON.
+    const convo = new ConversationManager();
     const sys = this.config.systemPrompt;
-    if (sys) messages.push({ role: 'system', content: sys });
-    messages.push({ role: 'user', content: userMessage });
+    if (sys) convo.push({ role: 'system', content: sys });
+    convo.push({ role: 'user', content: userMessage });
 
     const maxRounds = this.config.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
     const toolsCalled = new Set<string>();
@@ -146,14 +161,25 @@ export class AgentCoordinator {
         const nudge = this.config.onBeforeModelCall({
           round,
           toolsCalled: Array.from(toolsCalled),
-          messageCount: messages.length,
+          messageCount: convo.size(),
         });
-        if (nudge) messages.push({ role: 'user', content: nudge });
+        if (nudge) convo.push({ role: 'user', content: nudge });
+      }
+
+      // Shrink history before the call if it's grown past the compaction
+      // threshold. Best-effort: never blocks the loop.
+      try {
+        convo.maybeCompact();
+      } catch {
+        // Compaction is an optimization, not a correctness requirement.
       }
 
       let resp: CompletionResponse;
       try {
-        resp = await this.chatCompletion(messages, tools);
+        // Tool turns get a larger output budget so a big `write` (e.g. a full
+        // Python reimplementation) isn't truncated mid-content, which would
+        // produce invalid tool-call JSON that silently fails the task.
+        resp = await this.chatCompletion(convo.all(), tools, TOOL_TURN_MAX_TOKENS);
       } catch (err: any) {
         const msg = err?.message ?? String(err);
         this.emit({ type: 'error', data: { error: msg } });
@@ -177,7 +203,7 @@ export class AgentCoordinator {
       }
 
       // Record the assistant turn (with its tool calls) in history.
-      messages.push({
+      convo.push({
         role: 'assistant',
         content: resp.content,
         tool_calls: resp.toolCalls.map(tc => ({
@@ -190,7 +216,7 @@ export class AgentCoordinator {
         })),
       });
 
-      // Execute each tool call and append the results.
+      // Execute each tool call and append the results (truncated by the manager).
       for (const tc of resp.toolCalls) {
         toolsCalled.add(tc.name);
         this.emit({ type: 'tool_start', data: { tool: tc.name, input: tc.arguments } });
@@ -199,21 +225,19 @@ export class AgentCoordinator {
           type: 'tool_end',
           data: { tool: tc.name, input: tc.arguments, result },
         });
-        messages.push({
-          role: 'tool',
-          tool_call_id: tc.id,
-          content: typeof result.content === 'string' ? result.content : JSON.stringify(result.content),
-        });
+        const resultText = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+        convo.pushToolResult(tc.id, resultText);
       }
     }
 
     // Turn budget exhausted: ask the model for a final answer with no tools.
-    messages.push({
+    // A final answer is just a summary, so it gets the smaller default budget.
+    convo.push({
       role: 'user',
       content:
         'You have reached the tool-call limit. Stop calling tools and give your final answer now based on what you have so far.',
     });
-    const final = await this.chatCompletion(messages, []);
+    const final = await this.chatCompletion(convo.all(), []);
     const finalText = final.content ?? '';
     this.emit({ type: 'stream_end' });
     this.emit({ type: 'done', data: { response: finalText } });
@@ -224,13 +248,15 @@ export class AgentCoordinator {
   private async chatCompletion(
     messages: ChatMessage[],
     tools: ModelTool[],
+    /** Override max_tokens for this call (e.g. larger budget for tool turns). */
+    maxTokensOverride?: number,
   ): Promise<CompletionResponse> {
     const url = (this.config.baseUrl as string).replace(/\/$/, '') + '/chat/completions';
     const body: Record<string, unknown> = {
       model: this.config.model,
       messages,
       temperature: this.config.temperature ?? 0.7,
-      max_tokens: this.config.maxTokens ?? DEFAULT_MAX_TOKENS,
+      max_tokens: maxTokensOverride ?? this.config.maxTokens ?? DEFAULT_MAX_TOKENS,
       stream: false,
     };
     if (tools.length > 0) {
@@ -396,16 +422,151 @@ export class AgentCoordinator {
   }
 }
 
-function safeParseArgs(raw: unknown): Record<string, unknown> {
-  if (typeof raw === 'string') {
+/**
+ * Parse a model-emitted tool-call arguments string into an object.
+ *
+ * Weak models routinely emit arguments that aren't valid JSON:
+ *  - truncated mid-string when `max_tokens` cuts off a large `write` payload,
+ *  - single-quoted (Python-style) instead of double-quoted,
+ *  - trailing comma before the closing brace,
+ *  - raw unquoted prose.
+ *
+ * The previous behavior dropped these to `{ _raw: raw }`, which then made
+ * every tool fail its first validation check ("'path' is required") — wasting a
+ * full round and derailing the task. Instead we try a sequence of cheap repairs
+ * before giving up, so a near-valid call actually executes. Only when all
+ * repairs fail do we surface the raw text (under `_raw`) so the tool's own
+ * validation can produce its actionable error.
+ *
+ * Exported for direct unit testing of the repair ladder.
+ */
+export function safeParseArgs(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== 'string') {
+    if (raw && typeof raw === 'object') return raw as Record<string, unknown>;
+    return {};
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+
+  // 1. Happy path.
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // fall through to repairs
+  }
+
+  // 2. Backslash-truncation repair: the model produced valid JSON up to the
+  //    token cap. Find the last complete key/value and close the object.
+  const repaired = repairTruncatedObject(trimmed);
+  if (repaired !== null) {
     try {
-      return JSON.parse(raw);
+      return JSON.parse(repaired);
     } catch {
-      return { _raw: raw };
+      // try more repairs
     }
   }
-  if (raw && typeof raw === 'object') return raw as Record<string, unknown>;
-  return {};
+
+  // 3. Trailing-comma repair: `{ "path": "x", }` is invalid JSON but trivially fixable.
+  try {
+    return JSON.parse(trimmed.replace(/,\s*([}\]])/g, '$1'));
+  } catch {
+    // fall through
+  }
+
+  // 4. Single→double quote repair for simple flat objects (Python-style output).
+  try {
+    const doubled = trimmed.replace(/'/g, '"');
+    return JSON.parse(doubled);
+  } catch {
+    // give up gracefully
+  }
+
+  // Last resort: keep the raw text so the tool's validator can explain exactly
+  // what's wrong, rather than the coordinator silently dropping all args.
+  return { _raw: raw };
+}
+
+/**
+ * Attempt to repair a JSON object string that was cut off mid-write by the
+ * output token cap. Strategy: scan left from the end, tracking string/escape
+ * state, and cut at the last position where the object is structurally
+ * closable (inside a value → drop to the end of the previous complete value,
+ * then close any open braces/brackets).
+ *
+ * Returns a repaired string if a closable prefix was found, else null.
+ */
+function repairTruncatedObject(s: string): string | null {
+  // Must look like an object/JSON value to bother.
+  if (!s.startsWith('{') && !s.startsWith('[')) return null;
+
+  // Walk the string tracking whether we're inside a string literal; find the
+  // last index that ends a complete top-level value we can close from.
+  let inString = false;
+  let escape = false;
+  let lastComplete = -1;
+  let depth = 0;
+  let prevNonSpace: string | null = null;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === '\\') {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{' || ch === '[') {
+      depth++;
+      continue;
+    }
+    if (ch === '}' || ch === ']') {
+      depth--;
+      continue;
+    }
+    if (ch === ',') {
+      // A comma marks the end of a complete value (the char before it, sans
+      // whitespace, was a value terminator). Record this position as a safe
+      // truncation point.
+      lastComplete = i;
+    }
+    if (!/\s/.test(ch)) prevNonSpace = ch;
+  }
+
+  // If the string already parses, nothing to do (caller handles that). Here we
+  // only act when we were cut off: the last non-space char is not a closing
+  // bracket matching the opener.
+  const opener = s[0];
+  const closer = opener === '{' ? '}' : ']';
+  if (prevNonSpace === closer) return null; // looks complete already
+
+  // Cut at the last safe comma (end of a complete value), trim trailing
+  // punctuation/whitespace, and close all open containers.
+  let cut = lastComplete >= 0 ? s.slice(0, lastComplete) : s;
+  // Trim trailing commas, whitespace, and incomplete key tokens (e.g. `"pa`).
+  cut = cut.replace(/[\s,]+$/, '');
+  // If it ends mid-key (e.g. `..., "path`), drop the dangling fragment.
+  cut = cut.replace(/,\s*"[^"]*$/, '').replace(/,\s*$/, '');
+
+  // Recount open vs closed braces/brackets in the trimmed string and append the
+  // missing closers. Cheap scan ignoring string contents is good enough: we
+  // only append closers, we never delete structure.
+  let opens = 0;
+  for (const ch of cut) {
+    if (ch === '{' || ch === '[') opens++;
+    else if (ch === '}' || ch === ']') opens--;
+  }
+  if (opens < 0) return null; // malformed in a way we can't fix
+  let repaired = cut;
+  for (let i = 0; i < opens; i++) repaired += closer;
+  return repaired;
 }
 
 function sleep(ms: number): Promise<void> {

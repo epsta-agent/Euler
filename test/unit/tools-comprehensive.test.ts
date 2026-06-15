@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeAll } from 'bun:test';
 import { writeTool } from '../../src/agent/tool';
-import { readTool, hashlineEditTool, searchTool, findTool, grepTool } from '../../src/agent/tool';
+import { readTool, editTool, lsTool, globTool, searchTool, findTool, grepTool } from '../../src/agent/tool';
 import { tools } from '../../src/agent/tool';
 
 describe('Comprehensive Tool Tests', () => {
@@ -22,7 +22,7 @@ describe('Comprehensive Tool Tests', () => {
     it('should have all expected tools', () => {
       const toolNames = tools.map(t => t.name);
       const expectedTools = [
-        'read', 'write', 'edit', 'hashline_edit',
+        'read', 'write', 'edit', 'ls', 'glob',
         'search', 'find', 'grep',
         'bash', 'eval', 'lsp', 'task'
       ];
@@ -32,11 +32,16 @@ describe('Comprehensive Tool Tests', () => {
       }
     });
 
+    it('should not register the removed hashline_edit tool', () => {
+      const toolNames = tools.map(t => t.name);
+      expect(toolNames).not.toContain('hashline_edit');
+    });
+
     it('should get tools by category', async () => {
       const { getToolsByCategory } = await import('../../src/agent/tool');
 
       const fileTools = getToolsByCategory('file');
-      expect(fileTools.length).toBeGreaterThanOrEqual(3);
+      expect(fileTools.length).toBeGreaterThanOrEqual(4);
 
       const searchTools = getToolsByCategory('search');
       expect(searchTools.length).toBeGreaterThanOrEqual(2);
@@ -61,35 +66,79 @@ describe('Comprehensive Tool Tests', () => {
     });
   });
 
-  describe('Hashline Edit Tool', () => {
-    it('should compute hash for content', async () => {
-      const content = 'Test content';
-      const crypto = await import('crypto');
-      const hash = crypto.createHash('sha256')
-        .update(content)
-        .digest('hex')
-        .substring(0, 16);
-
-      expect(hash).toBeDefined();
-      expect(hash.length).toBe(16);
+  describe('Edit Tool', () => {
+    it('should apply an exact, unambiguous replacement', async () => {
+      const editPath = '/tmp/euler-edit-test.txt';
+      await writeTool.execute({ path: editPath, content: 'alpha\nbeta\ngamma' });
+      const result = await editTool.execute({
+        path: editPath,
+        oldText: 'beta',
+        newText: 'BETA',
+      });
+      expect(result.isError).toBe(false);
+      const after = await readTool.execute({ path: editPath });
+      expect(after.content).toContain('BETA');
+      expect(after.content).not.toContain('\nbeta\n');
     });
 
-    it('should create hashline edit input', async () => {
-      const crypto = await import('crypto');
-      const computeHash = (text: string) =>
-        crypto.createHash('sha256').update(text).digest('hex').substring(0, 16);
+    it('should return the file head when oldText is not found, to help re-anchor', async () => {
+      const editPath = '/tmp/euler-edit-nf.txt';
+      await writeTool.execute({ path: editPath, content: 'first\nsecond\nthird' });
+      const result = await editTool.execute({
+        path: editPath,
+        oldText: 'does not exist',
+        newText: 'x',
+      });
+      expect(result.isError).toBe(true);
+      // The strengthened message surfaces the first lines so the model can
+      // re-anchor without a separate read() round-trip.
+      expect(result.content).toContain('1: first');
+    });
 
-      const hash = computeHash('Line 1');
+    it('should reject an ambiguous oldText', async () => {
+      const editPath = '/tmp/euler-edit-ambig.txt';
+      await writeTool.execute({ path: editPath, content: 'dup\ndup\nother' });
+      const result = await editTool.execute({
+        path: editPath,
+        oldText: 'dup',
+        newText: 'x',
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain('ambiguous');
+    });
+  });
 
-      const edit = {
-        hash,
-        oldText: 'Line 1',
-        newText: 'Modified Line 1'
-      };
+  describe('ls Tool', () => {
+    it('should list entries in a directory, marking directories with a trailing slash', async () => {
+      const result = await lsTool.execute({ path: '/tmp' });
+      expect(result.isError).toBe(false);
+      expect(typeof result.content).toBe('string');
+      expect((result.content as string).length).toBeGreaterThan(0);
+    });
 
-      expect(edit.hash).toBeDefined();
-      expect(edit.oldText).toBe('Line 1');
-      expect(edit.newText).toBe('Modified Line 1');
+    it('should error on a missing directory', async () => {
+      const result = await lsTool.execute({ path: '/tmp/euler-definitely-missing-dirs-xyz' });
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  describe('glob Tool', () => {
+    it('should match files by pattern', async () => {
+      const result = await globTool.execute({
+        pattern: 'euler-edit-test.txt',
+        path: '/tmp',
+      });
+      expect(result.isError).toBe(false);
+      expect(result.content).toContain('euler-edit-test.txt');
+    });
+
+    it('should report no matches cleanly', async () => {
+      const result = await globTool.execute({
+        pattern: 'no-such-file-xyzabc.txt',
+        path: '/tmp',
+      });
+      expect(result.isError).toBe(false);
+      expect(result.content).toContain('No files matched');
     });
   });
 

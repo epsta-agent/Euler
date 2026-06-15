@@ -60,8 +60,16 @@ export const editTool: Tool = {
 
       const matches = countOccurrences(content, oldText);
       if (matches === 0) {
+        // Surface the first few lines of the file so the model can re-anchor
+        // oldText without burning a separate `read` round-trip. This is the
+        // common failure on weak models that mis-remember indentation/whitespace.
+        const lines = content.split('\n').slice(0, 8);
+        const numbered = lines.map((l, i) => `${i + 1}: ${l}`).join('\n');
         return {
-          content: `Error: oldText not found in file. Make sure oldText matches the file exactly (indentation, whitespace, newlines).`,
+          content:
+            `Error: oldText not found in file. The text must match exactly — indentation, whitespace, and newlines all matter. ` +
+            `Here are the first lines of the file to help you re-anchor:\n${numbered}\n\n` +
+            `Tip: call read() on this file first to copy the exact text you want to replace.`,
           isError: true,
         };
       }
@@ -78,7 +86,7 @@ export const editTool: Tool = {
       const newContent = content.replace(oldText, newText);
       await writeFile(absolutePath, newContent, 'utf-8');
 
-      return { content: `Successfully edited ${path}` };
+      return { isError: false, content: `Successfully edited ${path}` };
     } catch (error: any) {
       const msg = error?.code === 'ENOENT'
         ? `Error editing file: file not found at '${path}'`

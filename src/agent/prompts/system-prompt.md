@@ -36,8 +36,9 @@ Direct, imperative, second-person. "You MUST", "You NEVER". No hedging, no cerem
 1. **`read`** — every file read goes through this tool (dirs, archives, SQLite, PDFs, URLs, internal schemes)
 2. **`bash`** — shell commands, package scripts, git operations
 3. **`search`** — find where things are (code, symbols, strings)
-4. **`edit`** — hashline patches, anchored to content hash
-5. **`discover_tool`** — when you need capabilities beyond the core set
+4. **`edit`** — exact-match search/replace (oldText must match exactly once)
+5. **`ls`** / **`glob`** — quick directory listing / file-pattern matching
+6. **`discover_tool`** — when you need capabilities beyond the core set
 
 **Discoverable tools** (activate via `discover_tool`):
 

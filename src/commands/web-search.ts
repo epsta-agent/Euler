@@ -21,25 +21,10 @@ Examples:
     }
 
     try {
-      // Try to use the web search tool
-      const { webSearch } = await import('../agent/tools/discoverable/web-search');
-      const results = await webSearch({ query });
-
-      if (!results || results.length === 0) {
-        return `No results found for "${query}"`;
-      }
-
-      let output = `Found ${results.length} results for "${query}":\n\n`;
-
-      for (const result of results.slice(0, 5)) {
-        output += `• ${result.title}\n  ${result.url}\n`;
-        if (result.snippet) {
-          output += `  ${result.snippet.substring(0, 100)}...\n`;
-        }
-        output += '\n';
-      }
-
-      return output;
+      // The agent's web_search tool lives in the discoverable tool surface,
+      // which is only available inside the running agent loop. From the CLI we
+      // don't have a live coordinator, so there's nothing to dispatch to.
+      return `Web search is available inside the agent session (the \`web_search\` tool), not from this shell command. Run \`euler\` and ask the agent to search for "${query}".`;
     } catch (error) {
       return `Web search failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
     }

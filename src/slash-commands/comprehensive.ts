@@ -339,7 +339,6 @@ Discoverable (activate via /discover_tool):
   - recipe: Task runner integration
   - find: File discovery`,
   },
-  },
 
   // === Context Command ===
   {
@@ -352,7 +351,7 @@ Discoverable (activate via /discover_tool):
 - Tokens: ~12,000
 - Providers: anthropic, openai`,
   },
-};
+];
 
 /**
  * Initialize slash commands registry with all built-in commands
