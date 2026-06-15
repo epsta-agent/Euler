@@ -115,8 +115,8 @@ function parseToml(text: string): Record<string, any> {
         .replace(/^\[/, '')
         .replace(/\]$/, '')
         .split(',')
-        .map((s) => s.trim().replace(/^["']|["']$/g, ''))
-        .filter((s) => s.length > 0);
+        .map((s: string) => s.trim().replace(/^["']|["']$/g, ''))
+        .filter((s: string) => s.length > 0);
     } else if (val.startsWith('"')) {
       val = val.replace(/^"/, '').replace(/"$/, '');
     } else if (val === 'true' || val === 'false') {
