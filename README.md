@@ -14,8 +14,6 @@ real engineering tasks.
   the TUI.
 - **`src/native/debug-bridge.ts`** — spawns and talks to the `euler-debug`
   binary over line-delimited JSON.
-- **`bench/`** — a self-contained SWE-bench / terminal-bench-style evaluation
-  harness with sample tasks.
 
 ## Rust-native debugger (`native/euler-debug`)
 
@@ -60,31 +58,6 @@ bun install                # TypeScript deps
 cargo test --manifest-path native/Cargo.toml --workspace   # 30+ native tests
 bun test                   # agent tests
 ```
-
-## Benchmark
-
-`bench/` is a [terminal-bench](https://github.com/harbor-framework/terminal-bench)
--compatible harness. Each task is `bench/tasks/<id>/` with a real
-`task.yaml` (instruction, parser_name, timeouts) + a pytest evaluator
-(`tests/test_outputs.py`). The agent runs in a fresh copy of the task files;
-a task is resolved iff the evaluator passes.
-
-The harness does **not** hardcode any API key — the caller supplies one:
-
-```bash
-API_KEY=sk-... bun bench/run.ts --base-url=https://api.deepseek.com/v1 --model=deepseek-v4-flash
-```
-
-Or via the SDK (`bench/sdk.ts`): `runTerminalBench({ apiKey, baseUrl, model })`.
-
-### Measured result
-
-`deepseek-v4-flash` on an 8-task **Terminal-Bench 2.x** sample (4 easy + 3
-medium + 1 hard), built and verified via the upstream `tests/test.sh` + reward
-file: **6/8 (75.0%)** — 2/4 easy, 3/3 medium, 1/1 hard. Resolved tasks include
-`fix-git`, `nginx-request-logging`, `password-recovery` (hard), `regex-log`,
-`sqlite-db-truncate`, `prove-plus-comm`. See `bench/README.md` for the full
-breakdown and how to run the complete 89-task set.
 
 ## Configuration
 
