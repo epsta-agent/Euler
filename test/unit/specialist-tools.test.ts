@@ -11,12 +11,17 @@ import { describe, it, expect } from 'bun:test';
 import {
   parseBoxWarnings,
   parseTestSummary,
+  extractBuildErrors,
   makeLatexCheckTool,
   makeLatexFixBoxesTool,
   makeRunTestsTool,
   makeInspectEnvTool,
+  makeInstallDepsTool,
+  makeBuildTool,
   makeHexDumpTool,
   makeDiffTool,
+  makeTreeTool,
+  makeHttpRequestTool,
   type ExecFn,
 } from '../../src/agent/tool/specialist';
 
@@ -333,5 +338,209 @@ describe('latex_fix_boxes — end to end', () => {
     const result = await tool.execute({});
     expect(result.isError).toBe(true);
     expect(result.content).toContain('could not find');
+  });
+});
+
+describe('latex_check — cross-tool steering', () => {
+  it('recommends calling latex_fix_boxes (not hand-editing) when warnings exist', async () => {
+    const exec = fakeExec([
+      [/pdflatex/, 'ok', 0],
+      [
+        /cat \*\.log/,
+        'Overfull \\hbox (3.76862pt too wide) in paragraph at lines 7--8\n\\OT1/cmr/m/n/10 man-tic',
+        0,
+      ],
+    ]);
+    const tool = makeLatexCheckTool(exec);
+    const result = await tool.execute({ file: 'main.tex' });
+    // The steering is the fix for the overfull-hbox whack-a-mole: the agent
+    // must be pointed at latex_fix_boxes by name, not told to hand-edit.
+    expect(result.content).toContain('latex_fix_boxes');
+    expect(result.content).not.toContain('\\sloppy / \\hbadness');
+  });
+});
+
+describe('extractBuildErrors', () => {
+  it('extracts gcc/clang error lines', () => {
+    const out = [
+      'main.c:10:5: error: use of undeclared identifier foo',
+      'main.c:11:1: warning: unused variable',
+      'main.c:12:3: error: expected \';\' after expression',
+      'Linking...',
+    ].join('\n');
+    const errors = extractBuildErrors(out);
+    expect(errors.length).toBe(2);
+    expect(errors[0]).toContain('undeclared identifier');
+    expect(errors[1]).toContain('expected');
+  });
+
+  it('extracts rustc error[Exxxx] lines', () => {
+    const out = [
+      'error[E0425]: cannot find value `x` in this scope',
+      '  --> src/main.rs:5:13',
+      '   |',
+      '5 |     println!("{}", x);',
+    ].join('\n');
+    const errors = extractBuildErrors(out);
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors.some((e) => e.includes('E0425'))).toBe(true);
+    expect(errors.some((e) => e.includes('main.rs:5:13'))).toBe(true);
+  });
+
+  it('extracts FAILED lines', () => {
+    const out = 'FAILED tests/test_a.py::test_foo\nFAILED tests/test_b.py::test_bar';
+    const errors = extractBuildErrors(out);
+    expect(errors.length).toBe(2);
+  });
+
+  it('returns empty for clean output', () => {
+    expect(extractBuildErrors('all good\nno problems here')).toEqual([]);
+  });
+
+  it('dedupes repeated errors', () => {
+    const out = 'main.c:1:1: error: x\nmain.c:1:1: error: x';
+    expect(extractBuildErrors(out).length).toBe(1);
+  });
+});
+
+describe('install_deps — end to end', () => {
+  it('auto-detects npm from package.json', async () => {
+    const exec = fakeExec([
+      [/package\.json/, 'yes', 0],
+      [/npm install/, 'added 42 packages', 0],
+      // package.json path also checks for bun/yarn
+      [/command -v bun/, 'no', 0],
+      [/command -v yarn/, 'no', 0],
+    ]);
+    const tool = makeInstallDepsTool(exec);
+    const result = await tool.execute({});
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain('npm install');
+    expect(result.content).toContain('installed successfully');
+  });
+
+  it('prefers bun when available (faster than npm)', async () => {
+    const exec = fakeExec([
+      [/package\.json/, 'yes', 0],
+      [/command -v bun/, 'yes', 0],
+      [/bun install/, 'Resolved, installed', 0],
+    ]);
+    const tool = makeInstallDepsTool(exec);
+    const result = await tool.execute({});
+    expect(result.content).toContain('bun install');
+  });
+
+  it('surfaces failure output tail on non-zero exit', async () => {
+    const exec = fakeExec([
+      [/test -f 'requirements\.txt'/, 'yes', 0],
+      [/pip install/, 'ERROR: Could not find a version\nHINT: check spelling', 1],
+    ]);
+    const tool = makeInstallDepsTool(exec);
+    const result = await tool.execute({});
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('Could not find a version');
+  });
+
+  it('errors when no manifest found and no manager forced', async () => {
+    const exec = fakeExec([[/test -f/, 'no', 0]]);
+    const tool = makeInstallDepsTool(exec);
+    const result = await tool.execute({});
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('No dependency manifest');
+  });
+});
+
+describe('build — end to end', () => {
+  it('reports success on exit 0', async () => {
+    const exec = fakeExec([
+      [/Makefile/, 'yes', 0],
+      [/\bmake\b/, 'gcc -c main.c\nLinking done', 0],
+    ]);
+    const tool = makeBuildTool(exec);
+    const result = await tool.execute({});
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain('Build succeeded');
+  });
+
+  it('extracts errors and shows output tail on failure', async () => {
+    const exec = fakeExec([
+      [/Makefile/, 'yes', 0],
+      [/\bmake\b/, 'main.c:5:1: error: missing semicolon\nmake: *** [main.o] Error 1', 2],
+    ]);
+    const tool = makeBuildTool(exec);
+    const result = await tool.execute({});
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('Build FAILED');
+    expect(result.content).toContain('missing semicolon');
+  });
+
+  it('runs an explicit command', async () => {
+    const exec = fakeExec([[/tsc --build/, '', 0]]);
+    const tool = makeBuildTool(exec);
+    const result = await tool.execute({ command: 'tsc --build' });
+    expect(result.isError).toBe(false);
+  });
+});
+
+describe('tree — end to end', () => {
+  it('formats a find output into an indented tree', async () => {
+    const exec = fakeExec([
+      [
+        /find/,
+        ['./src/main.ts', './src/util.ts', './README.md', './package.json'].join('\n'),
+        0,
+      ],
+    ]);
+    const tool = makeTreeTool(exec);
+    const result = await tool.execute({});
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain('src/');
+    expect(result.content).toContain('main.ts');
+    expect(result.content).toContain('README.md');
+  });
+
+  it('handles empty directory', async () => {
+    const exec = fakeExec([[/find/, '', 0]]);
+    const tool = makeTreeTool(exec);
+    const result = await tool.execute({});
+    expect(result.content).toContain('empty');
+  });
+});
+
+describe('http_request — end to end', () => {
+  it('requires a url', async () => {
+    const tool = makeHttpRequestTool(fakeExec([]));
+    const result = await tool.execute({});
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("required");
+  });
+
+  it('parses a 200 JSON response', async () => {
+    // The tool runs `bun -e '<script>'`; we fake the exec to return the JSON
+    // the script would produce.
+    const fakeResponse = JSON.stringify({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: { ok: true, message: 'hello' },
+    });
+    const exec = fakeExec([[/bun -e/, fakeResponse, 0]]);
+    const tool = makeHttpRequestTool(exec);
+    const result = await tool.execute({ url: 'https://example.com/api' });
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain('HTTP 200');
+    expect(result.content).toContain('hello');
+  });
+
+  it('marks non-2xx as error', async () => {
+    const fakeResponse = JSON.stringify({
+      status: 404,
+      headers: { 'content-type': 'text/plain' },
+      body: 'Not Found',
+    });
+    const exec = fakeExec([[/bun -e/, fakeResponse, 0]]);
+    const tool = makeHttpRequestTool(exec);
+    const result = await tool.execute({ url: 'https://example.com/missing' });
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('HTTP 404');
   });
 });
