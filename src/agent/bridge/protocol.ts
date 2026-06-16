@@ -22,6 +22,7 @@ export type BridgeRequest =
   | { op: 'initialize'; config: InitializeConfig }
   | { op: 'process'; message: string }
   | { op: 'interrupt' }
+  | { op: 'reset' }
   | { op: 'shutdown' };
 
 /** Configuration for an initialize request. */
@@ -40,6 +41,12 @@ export interface InitializeConfig {
   temperature?: number;
   /** Override the system prompt. */
   systemPrompt?: string;
+  /**
+   * If true, the agent resumes its most recent persisted session on init
+   * (replays the prior transcript into the conversation). When false or
+   * absent, a fresh session is created.
+   */
+  resume?: boolean;
 }
 
 /** Uniform response envelope. `ok: false` carries an error message. */

@@ -25,15 +25,15 @@ export default {
     mkdirSync(join(eulerDir, 'sessions'), { recursive: true });
     mkdirSync(join(eulerDir, 'plugins'), { recursive: true });
 
-    // Create default config
-    const { saveConfig, loadConfig } = await import('../config/config');
-    const defaultConfig = {
+    // Create default config. ConfigManager.save takes Partial<Config>; only the
+    // fields on the Config interface (provider, model, etc.) are persistable —
+    // UI prefs like theme/editor aren't part of Config, so omit them here.
+    const { ConfigManager } = await import('../config/config');
+    const manager = new ConfigManager();
+    await manager.save({
       provider: 'anthropic',
       model: 'claude-sonnet-4-5',
-      theme: 'dark',
-      editor: 'vim',
-    };
-    await saveConfig(defaultConfig);
+    });
 
     return `Euler setup complete!
 

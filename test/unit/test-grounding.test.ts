@@ -32,7 +32,12 @@ def test_program_output():
         "U001John Doe            0000001000U002Jane Smith"
         "          0000002000U003Bob Wilson          0000001500"
     )
+    initial_books = (
+        "B001Python Basics       U001B002COBOL Guide         "
+        "U002B003Java Tutorial       U003"
+    )
     Path("/app/src/INPUT.DAT").write_text("U001U003B0030000000020")
+    Path("/app/src/INPUT.DAT").write_text("U002U001B0030000000050")
     result = subprocess.run(["python", "/app/program.py"], capture_output=True, text=True)
     assert result.returncode == 0, "Command failed"
 
@@ -86,6 +91,19 @@ describe('test-grounding — cobol-modernization (regression)', () => {
 
   test('surfaces the returncode == 0 numeric assertion', () => {
     expect(g).toMatch(/assert ==.*0/);
+  });
+
+  test('surfaces the input fixtures (initial_* + write_text inputs)', () => {
+    // The cobol task's #1 failure cause: the model never derives the fixed-width
+    // record layout. The grounding MUST surface the input bytes that pair with
+    // the expected outputs, so the format is inferable. Without initial_accounts
+    // the model only sees expected_accounts and cannot reverse-engineer that
+    // "U001John Doe" = user-id + 20-char-padded name.
+    expect(g).toContain('initial_accounts:');
+    expect(g).toContain('initial_books:');
+    // The transaction inputs the grader feeds via write_text.
+    expect(g).toContain('input: U001U003B0030000000020');
+    expect(g).toContain('input: U002U001B0030000000050');
   });
 });
 
@@ -186,5 +204,45 @@ describe('test-grounding — pure unit behavior', () => {
     // Should not throw; should still surface the valid one.
     const g = groundFromSource(src);
     expect(g).toContain('expected_y: ok');
+  });
+
+  test('surfaces initial_* input fixtures that pair with expected outputs', () => {
+    // The data-processing/reimplementation shape: initial_X defines the input
+    // the program must parse; expected_X is what it must produce. Both halves
+    // of the contract must be surfaced.
+    const src = `
+def test_program_output():
+    initial_state = (
+        "AAA100"
+        "BBB200"
+    )
+    Path("/app/src/in").write_text("XYZ")
+    expected_state = "AAA099BBB201"
+    assert read("/app/out") == expected_state
+`;
+    const g = groundFromSource(src);
+    expect(g).toContain('initial_state: AAA100BBB200');
+    expect(g).toContain('input: XYZ');
+    expect(g).toContain('expected_state: AAA099BBB201');
+  });
+
+  test('non-string initial_ assignment is not surfaced as an input', () => {
+    // initial_x = build() — RHS is a call, not a literal fixture. Must not emit
+    // a bogus input value (mirrors the expected_ guard).
+    const src = 'initial_x = build()\ninitial_y = "real"\n';
+    const g = groundFromSource(src);
+    expect(g).not.toContain('initial_x:');
+    expect(g).toContain('initial_y: real');
+  });
+
+  test('input-fixture section absent when no initial_/write_text literals', () => {
+    // The overfull-hbox shape: no data fixtures, only structural assertions.
+    // The grounding must NOT emit an empty input-fixture header.
+    const src = `
+def test_compiles():
+    assert "Output written" in log
+`;
+    const g = groundFromSource(src);
+    expect(g).not.toMatch(/Input fixtures/);
   });
 });

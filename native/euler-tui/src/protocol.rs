@@ -23,12 +23,22 @@ pub enum Request {
     Process { message: String },
     #[serde(rename = "interrupt")]
     Interrupt,
+    /// Reset the agent's in-memory conversation (used by /clear). The process
+    /// stays alive — only the conversation history + active turn are dropped.
+    #[serde(rename = "reset")]
+    Reset,
     #[serde(rename = "shutdown")]
     Shutdown,
 }
 
 /// Configuration for an `initialize` request.
+///
+/// Serialized with camelCase field names so it matches the TS
+/// `InitializeConfig` in src/agent/bridge/protocol.ts (apiKey, baseUrl, …).
+/// Without `rename_all`, serde emits snake_case keys that the TS host silently
+/// ignores — which means explicit credentials never reach the coordinator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeConfig {
     pub provider: String,
     pub model: String,
@@ -42,6 +52,17 @@ pub struct InitializeConfig {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// If true, the agent resumes its most recent persisted session on init.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resume: bool,
+}
+
+/// Predicate for `skip_serializing_if`. serde's attribute requires a `&T ->
+/// bool` signature, so this intentionally takes a reference (clippy's
+/// "pass by value" suggestion does not apply to serde predicates).
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// Uniform response envelope from the agent. `ok: false` carries an error.
@@ -175,6 +196,67 @@ mod tests {
     }
 
     #[test]
+    fn parse_reset_request() {
+        let r: Request = serde_json::from_str(r#"{"op":"reset"}"#).unwrap();
+        assert!(matches!(r, Request::Reset));
+        // Round-trip through serialization.
+        let json = serde_json::to_string(&Request::Reset).unwrap();
+        assert_eq!(json, r#"{"op":"reset"}"#);
+    }
+
+    #[test]
+    fn initialize_config_resume_round_trip() {
+        // resume defaults to omitted (skip_serializing_if = is_false).
+        let cfg = InitializeConfig {
+            provider: "openai".into(),
+            model: "gpt-4o-mini".into(),
+            api_key: None,
+            base_url: None,
+            max_tool_rounds: None,
+            temperature: None,
+            system_prompt: None,
+            resume: false,
+        };
+        let s = serde_json::to_string(&cfg).unwrap();
+        assert!(!s.contains("resume"), "resume should be omitted when false: {s}");
+
+        // When true it's included.
+        let cfg2 = InitializeConfig { resume: true, ..cfg };
+        let s2 = serde_json::to_string(&cfg2).unwrap();
+        assert!(s2.contains("\"resume\":true"), "resume should be present when true: {s2}");
+
+        // Deserializing a line without resume defaults to false.
+        let parsed: InitializeConfig = serde_json::from_str(
+            r#"{"provider":"openai","model":"gpt-4o-mini"}"#,
+        )
+        .unwrap();
+        assert!(!parsed.resume);
+    }
+
+    #[test]
+    fn initialize_config_serializes_camel_case_keys() {
+        // The TS host reads cfg.apiKey / cfg.baseUrl (camelCase). If the Rust
+        // side emits snake_case (api_key), the credentials are silently dropped
+        // — this test pins the rename.
+        let cfg = InitializeConfig {
+            provider: "zai".into(),
+            model: "m".into(),
+            api_key: Some("sk-mock".into()),
+            base_url: Some("http://localhost:5601/v1".into()),
+            max_tool_rounds: Some(30),
+            temperature: None,
+            system_prompt: None,
+            resume: false,
+        };
+        let s = serde_json::to_string(&cfg).unwrap();
+        assert!(s.contains("\"apiKey\":\"sk-mock\""), "expected camelCase apiKey: {s}");
+        assert!(s.contains("\"baseUrl\":\"http://localhost:5601/v1\""), "expected camelCase baseUrl: {s}");
+        assert!(s.contains("\"maxToolRounds\":30"), "expected camelCase maxToolRounds: {s}");
+        assert!(!s.contains("api_key"), "snake_case leaked: {s}");
+        assert!(!s.contains("base_url"), "snake_case leaked: {s}");
+    }
+
+    #[test]
     fn parse_message_event() {
         let line = r#"{"event":"message","data":{"text":"hi there"}}"#;
         let msg = AgentMessage::parse(line).unwrap();
@@ -228,7 +310,7 @@ mod tests {
                 assert!(r.ok);
                 assert!(r.result.is_some());
             }
-            _ => panic!("expected Response"),
+            AgentMessage::Event(_) => panic!("expected Response"),
         }
         let fail = r#"{"ok":false,"error":"no key"}"#;
         match AgentMessage::parse(fail).unwrap() {
@@ -236,7 +318,7 @@ mod tests {
                 assert!(!r.ok);
                 assert_eq!(r.error.as_deref(), Some("no key"));
             }
-            _ => panic!("expected Response"),
+            AgentMessage::Event(_) => panic!("expected Response"),
         }
     }
 

@@ -24,6 +24,7 @@
 import { AgentCoordinator } from './agent/agent/coordinator';
 import { tools as allTools } from './agent/tool';
 import { resolveProviderCredentials, listConfigurableProviders, getProviderEndpoint } from './agent/model/provider-config';
+import { SessionManager } from './sessions/manager';
 import {
   type BridgeRequest,
   type BridgeResponse,
@@ -34,6 +35,14 @@ import {
 
 let coordinator: AgentCoordinator | null = null;
 let initialized = false;
+
+/**
+ * Persistent session store (SQLite at ~/.euler/sessions.db). One session per
+ * initialize; each user message + final assistant answer is appended so the
+ * transcript survives across restarts (`--resume` replays it).
+ */
+let sessions: SessionManager | null = null;
+let sessionId: string | null = null;
 
 // A single buffered writer so events and responses interleave cleanly and we
 // never emit a partial line. process.stdout is a Bun stream; we write a line
@@ -112,6 +121,34 @@ async function handle(req: BridgeRequest): Promise<void> {
             systemPrompt: cfg.systemPrompt,
           },
         );
+        // Open the session store and either resume the most recent session
+        // (--resume) or create a fresh one. Resume replays the prior transcript
+        // into the coordinator's in-memory conversation so the model remembers.
+        try {
+          if (!sessions) sessions = new SessionManager();
+          if (cfg.resume) {
+            const recent = sessions.getMostRecentSession();
+            if (recent) {
+              sessionId = recent.id;
+              sessions.setCurrentSession(sessionId);
+              const prior = await sessions.getMessages(sessionId);
+              // Replay the stored user/assistant turns into the conversation.
+              coordinator.seedConversation(prior);
+              log(`resumed session ${sessionId} (${prior.length} messages)`);
+            } else {
+              sessionId = await sessions.createSession(process.cwd(), model);
+              log(`no session to resume; created new session ${sessionId}`);
+            }
+          } else {
+            sessionId = await sessions.createSession(process.cwd(), model);
+            log(`created new session ${sessionId}`);
+          }
+        } catch (sessErr: any) {
+          // Persistence is best-effort: a failure here must not block the agent.
+          log(`session store unavailable: ${sessErr?.message ?? sessErr}`);
+          sessions = null;
+          sessionId = null;
+        }
         // Bridge every agent event to a stdout Event line.
         coordinator.onEvent((e) => {
           switch (e.type) {
@@ -154,7 +191,7 @@ async function handle(req: BridgeRequest): Promise<void> {
         });
         initialized = true;
         log(`initialized: provider=${cfg.provider} model=${model} tools=${allTools.length}`);
-        ok({ provider: cfg.provider, model, toolCount: allTools.length });
+        ok({ provider: cfg.provider, model, toolCount: allTools.length, sessionId });
       } catch (err: any) {
         fail(`failed to initialize coordinator: ${err?.message ?? err}`);
       }
@@ -172,8 +209,21 @@ async function handle(req: BridgeRequest): Promise<void> {
         return;
       }
       try {
+        // Persist the user's message before running (so a crash mid-turn
+        // still leaves the question on disk).
+        if (sessions && sessionId) {
+          try {
+            await sessions.appendEntry(sessionId, { type: 'message', role: 'user', content: message });
+          } catch { /* best-effort */ }
+        }
         // process() returns the final text; events stream out via onEvent.
         const finalText = await coordinator.process(message);
+        // Persist the assistant's answer.
+        if (sessions && sessionId && finalText) {
+          try {
+            await sessions.appendEntry(sessionId, { type: 'message', role: 'assistant', content: finalText });
+          } catch { /* best-effort */ }
+        }
         ok({ response: finalText });
       } catch (err: any) {
         fail(`process failed: ${err?.message ?? err}`);
@@ -182,15 +232,34 @@ async function handle(req: BridgeRequest): Promise<void> {
     }
 
     case 'interrupt': {
-      // Best-effort: there's no clean cooperative cancel on the coordinator today.
-      // We acknowledge; the TUI may choose to restart the subprocess for a hard cancel.
-      log('interrupt received (cooperative cancel not yet supported — restart subprocess for hard cancel)');
+      // Abort the in-flight model request. The running process() will reject
+      // with AbortError, emit an 'error'/'interrupted' event, and return — at
+      // which point the normal ok({response}) path fires and the TUI's
+      // bridge_busy flag clears. We don't reply to interrupt itself with the
+      // final text; the pending process reply does that.
+      if (coordinator) {
+        coordinator.interrupt();
+        log('interrupt: aborted in-flight request');
+      }
       ok({ interrupted: true });
+      return;
+    }
+
+    case 'reset': {
+      // /clear: drop the in-memory conversation so the next message starts fresh.
+      if (coordinator) {
+        coordinator.reset();
+        log('reset: conversation cleared');
+      }
+      ok({ reset: true });
       return;
     }
 
     case 'shutdown': {
       log('shutdown requested');
+      if (sessions) {
+        try { sessions.close(); } catch { /* best-effort */ }
+      }
       ok();
       process.exit(0);
     }
@@ -207,8 +276,16 @@ async function main(): Promise<void> {
 
   // Bun: read stdin line-by-line. We buffer to split on newlines ourselves so
   // we never block on a partial line and can handle EOF cleanly.
+  //
+  // IMPORTANT: a `process` op can run for a long time (model calls, tools). To
+  // keep `interrupt` reachable while one is in flight, we do NOT `await` the
+  // process handler inline. Instead `process` is fired as a background task and
+  // control ops (`interrupt`, `reset`, `shutdown`) are handled immediately when
+  // their line arrives — so Esc actually aborts the running request instead of
+  // queueing behind it.
   const stdin = process.stdin;
   let buffer = '';
+  let pending: Promise<void> | null = null;
 
   for await (const chunk of stdin) {
     buffer += chunk.toString();
@@ -222,9 +299,31 @@ async function main(): Promise<void> {
         fail(`invalid request (not JSON or missing op): ${line.slice(0, 200)}`);
         continue;
       }
-      await handle(req);
+      // Control ops run immediately, even mid-turn.
+      if (req.op === 'interrupt') {
+        await handle(req);
+        continue;
+      }
+      // For everything else, wait for any in-flight process to finish first so
+      // we don't interleave two turns. (initialize/reset/shutdown are quick.)
+      if (pending) {
+        await pending.catch(() => {});
+        pending = null;
+      }
+      if (req.op === 'process') {
+        // Fire-and-track: the loop continues reading, so an `interrupt` line
+        // arriving during this turn is handled by the branch above.
+        pending = handle(req).catch((err) => {
+          log('process task error: ' + (err?.message ?? err));
+        });
+        // Don't await — return control to the reader immediately.
+      } else {
+        await handle(req);
+      }
     }
   }
+  // Wait for any in-flight turn before exiting.
+  if (pending) await pending.catch(() => {});
   // stdin closed (TUI exited) — clean shutdown.
   log('stdin closed, exiting');
   process.exit(0);

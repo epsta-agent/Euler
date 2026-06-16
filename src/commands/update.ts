@@ -22,8 +22,13 @@ Options:
     }
 
     try {
-      // Get current version
-      const packageJson = await import('../package.json');
+      // Get current version. Read via fs (not a JSON import) so the path is not
+      // constrained by tsconfig rootDir — package.json lives at the repo root,
+      // outside src/.
+      const { readFile } = await import('fs/promises');
+      const { resolve } = await import('path');
+      const packagePath = resolve(__dirname, '..', '..', 'package.json');
+      const packageJson = JSON.parse(await readFile(packagePath, 'utf-8'));
       const currentVersion = packageJson.version || '0.0.0';
 
       // Check if we're in a git repository
