@@ -31,7 +31,11 @@ pub struct Bridge {
 impl Bridge {
     /// Spawn the headless agent. `project_root` is the euler repo root (where
     /// src/headless.ts lives). `headless_path` defaults to `src/headless.ts`.
-    pub async fn spawn(project_root: PathBuf) -> Result<Self> {
+    ///
+    /// Not async: `tokio::process::Command::spawn()` is synchronous (it forks
+    /// immediately), and nothing in the body awaits — so there's no reason for
+    /// the caller to `.await` this. Marking it async was just noise.
+    pub fn spawn(project_root: PathBuf) -> Result<Self> {
         let headless = project_root.join("src").join("headless.ts");
         let mut child = tokio::process::Command::new("bun")
             .arg(&headless)
@@ -90,6 +94,20 @@ impl Bridge {
         .await
     }
 
+    /// Send an interrupt request. This asks the agent to abort the in-flight
+    /// model request for the current turn. The agent acknowledges with a
+    /// Response (ok:false, error:"interrupted") which the main loop receives
+    /// through the normal pump and uses to clear `bridge_busy`.
+    pub async fn interrupt(&mut self) -> Result<()> {
+        self.send_request(&Request::Interrupt).await
+    }
+
+    /// Send a reset request (/clear): drop the agent's in-memory conversation.
+    /// The subprocess stays alive; only history is cleared.
+    pub async fn reset(&mut self) -> Result<()> {
+        self.send_request(&Request::Reset).await
+    }
+
     /// Send a shutdown request (the child exits 0).
     pub async fn shutdown(&mut self) -> Result<()> {
         self.send_request(&Request::Shutdown).await
@@ -124,15 +142,8 @@ impl Bridge {
         Ok(())
     }
 
-    /// Detach the stdin so the child sees EOF (used on shutdown paths).
-    #[allow(dead_code)]
-    pub fn close_stdin(&mut self) {
-        // Dropping ChildStdin closes the pipe. We take it by replacing with a
-        // dummy — but ChildStdin doesn't have a clean take. Instead we rely on
-        // shutdown() / kill_on_drop.
-    }
-
-    /// Hard-kill the child if it's still running.
+    /// Hard-kill the child if it's still running. Kept as an escape hatch even
+    /// though the normal shutdown path uses `shutdown()` + `kill_on_drop`.
     #[allow(dead_code)]
     pub fn kill(&mut self) {
         let _ = self.child.start_kill();
@@ -153,7 +164,8 @@ async fn reader_task(stdout: ChildStdout, tx: mpsc::Sender<AgentMessage>) {
     loop {
         buf.clear();
         match reader.read_line(&mut buf).await {
-            Ok(0) => break, // EOF — child closed stdout
+            // EOF (child closed stdout) and read errors both end the pump.
+            Ok(0) | Err(_) => break,
             Ok(_) => {
                 if let Some(msg) = AgentMessage::parse(&buf) {
                     if tx.send(msg).await.is_err() {
@@ -163,7 +175,6 @@ async fn reader_task(stdout: ChildStdout, tx: mpsc::Sender<AgentMessage>) {
                 }
                 // Unparseable lines are ignored (the host guarantees JSON).
             }
-            Err(_) => break,
         }
     }
 }

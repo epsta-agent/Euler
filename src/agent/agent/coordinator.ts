@@ -94,10 +94,30 @@ export class AgentCoordinator {
   private config: AgentConfig;
   private eventHandlers = new Set<(event: AgentEvent) => void>();
 
+  /**
+   * Instance-level conversation state. Kept across `process()` calls so the
+   * agent remembers prior turns within a session (every other coding agent
+   * does this; the previous per-call `new ConversationManager()` meant the TUI
+   * had no multi-turn memory at all). Reset via `reset()`.
+   */
+  private convo: ConversationManager;
+  /** True between a process() start and its terminal event (done/error). */
+  private running = false;
+  /**
+   * Abort handle for the in-flight model request, if any. `interrupt()` aborts
+   * it so a runaway turn can be cancelled without killing the subprocess — the
+   * conversation and the tool-loop state survive, so the next user message
+   * continues with full context.
+   */
+  private currentAbort: AbortController | null = null;
+
   constructor(provider: ProviderInterface, tools: Tool[], config: AgentConfig) {
     this.provider = provider;
     this.tools = tools;
     this.config = config;
+    this.convo = new ConversationManager();
+    const sys = this.config.systemPrompt;
+    if (sys) this.convo.push({ role: 'system', content: sys });
   }
 
   onEvent(handler: (event: AgentEvent) => void): void {
@@ -112,6 +132,47 @@ export class AgentCoordinator {
         // A handler error must not break the agent loop.
       }
     });
+  }
+
+  /**
+   * Abort the in-flight model request for the current turn, if any. Safe to
+   * call when idle (no-op). The current `process()` call will reject with an
+   * AbortError, which `processWithToolLoop` translates into an `interrupted`
+   * event + a short return value. Conversation memory is preserved.
+   */
+  interrupt(): void {
+    if (this.currentAbort) {
+      this.currentAbort.abort();
+    }
+  }
+
+  /**
+   * Forget the entire conversation and start fresh (used by `/clear`). The
+   * system prompt is re-seeded so the model keeps its instructions.
+   */
+  reset(): void {
+    this.convo = new ConversationManager();
+    const sys = this.config.systemPrompt;
+    if (sys) this.convo.push({ role: 'system', content: sys });
+  }
+
+  /**
+   * Replay a stored transcript into the conversation (used by `--resume`).
+   * Each entry becomes a message in the in-memory conversation so the model
+   * has full context for the next user turn. Tool-call structure isn't
+   * reconstructed (a resumed turn's prior tool results are folded in as
+   * assistant/user text), which is sufficient for continuity.
+   */
+  seedConversation(messages: Array<{ role: string; content: string }>): void {
+    this.reset();
+    for (const m of messages) {
+      if (m.role === 'user' || m.role === 'assistant') {
+        this.convo.push({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        });
+      }
+    }
   }
 
   /**
@@ -140,73 +201,86 @@ export class AgentCoordinator {
       },
     }));
 
-    // The conversation manager owns the running message list and applies two
-    // safety policies before each model call: per-result truncation (a verbose
-    // `apt-get install` log no longer eats the whole window) and token-aware
-    // compaction (oldest tool turns get folded into a recap once the estimate
-    // crosses ~96k tokens). Without these, long terminal-bench tasks exhaust
-    // the context window and start producing truncated tool-call JSON.
-    const convo = new ConversationManager();
-    const sys = this.config.systemPrompt;
-    if (sys) convo.push({ role: 'system', content: sys });
+    // The conversation manager is an instance field, so multi-turn memory
+    // persists across process() calls. The system prompt was seeded in the
+    // constructor / reset(); here we just append the user's new message.
+    const convo = this.convo;
     convo.push({ role: 'user', content: userMessage });
 
     const maxRounds = this.config.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
     const toolsCalled = new Set<string>();
 
-    for (let round = 0; round < maxRounds; round++) {
-      // Optional progress nudge: if the caller supplied onBeforeModelCall, let
-      // it inject a user message (e.g. "you haven't written any file yet").
-      if (this.config.onBeforeModelCall) {
-        const nudge = this.config.onBeforeModelCall({
-          round,
-          toolsCalled: Array.from(toolsCalled),
-          messageCount: convo.size(),
-        });
-        if (nudge) convo.push({ role: 'user', content: nudge });
-      }
+    // An abort controller scoped to this turn. `interrupt()` aborts it.
+    const abort = new AbortController();
+    this.currentAbort = abort;
+    this.running = true;
 
-      // Shrink history before the call if it's grown past the compaction
-      // threshold. Best-effort: never blocks the loop.
-      try {
-        convo.maybeCompact();
-      } catch {
-        // Compaction is an optimization, not a correctness requirement.
-      }
+    try {
+      for (let round = 0; round < maxRounds; round++) {
+        // Cooperative cancellation: if the user hit Esc, stop now and surface a
+        // clean interrupted event instead of continuing the tool loop.
+        if (abort.signal.aborted) {
+          this.emit({ type: 'error', data: { error: 'interrupted' } });
+          return '[interrupted]';
+        }
 
-      let resp: CompletionResponse;
-      try {
-        // Tool turns get a larger output budget so a big `write` (e.g. a full
-        // Python reimplementation) isn't truncated mid-content, which would
-        // produce invalid tool-call JSON that silently fails the task.
-        resp = await this.chatCompletion(convo.all(), tools, TOOL_TURN_MAX_TOKENS);
-      } catch (err: any) {
-        const msg = err?.message ?? String(err);
-        this.emit({ type: 'error', data: { error: msg } });
-        return `⚠️ Model request failed: ${msg}`;
-      }
+        // Optional progress nudge: if the caller supplied onBeforeModelCall, let
+        // it inject a user message (e.g. "you haven't written any file yet").
+        if (this.config.onBeforeModelCall) {
+          const nudge = this.config.onBeforeModelCall({
+            round,
+            toolsCalled: Array.from(toolsCalled),
+            messageCount: convo.size(),
+          });
+          if (nudge) convo.push({ role: 'user', content: nudge });
+        }
 
-      // Stream the assistant's text to handlers as message deltas.
-      if (resp.content) {
-        this.emit({
-          type: 'message',
-          data: { text: resp.content, delta: true },
-        });
-      }
+        // Shrink history before the call if it's grown past the compaction
+        // threshold. Best-effort: never blocks the loop.
+        try {
+          convo.maybeCompact();
+        } catch {
+          // Compaction is an optimization, not a correctness requirement.
+        }
 
-      // No tool calls => the model is done; return its text.
-      if (resp.toolCalls.length === 0) {
-        const finalText = resp.content ?? '';
-        this.emit({ type: 'stream_end' });
-        this.emit({ type: 'done', data: { response: finalText } });
-        return finalText;
-      }
+        let resp: CompletionResponse;
+        try {
+          // Tool turns get a larger output budget so a big `write` (e.g. a full
+          // Python reimplementation) isn't truncated mid-content, which would
+          // produce invalid tool-call JSON that silently fails the task.
+          resp = await this.chatCompletion(convo.all(), tools, TOOL_TURN_MAX_TOKENS, abort.signal);
+        } catch (err: any) {
+          const aborted = err?.name === 'AbortError' || abort.signal.aborted;
+          const msg = err?.message ?? String(err);
+          if (aborted) {
+            this.emit({ type: 'error', data: { error: 'interrupted' } });
+            return '[interrupted]';
+          }
+          this.emit({ type: 'error', data: { error: msg } });
+          return `⚠️ Model request failed: ${msg}`;
+        }
 
-      // Record the assistant turn (with its tool calls) in history.
-      convo.push({
-        role: 'assistant',
-        content: resp.content,
-        tool_calls: resp.toolCalls.map(tc => ({
+        // Stream the assistant's text to handlers as message deltas.
+        if (resp.content) {
+          this.emit({
+            type: 'message',
+            data: { text: resp.content, delta: true },
+          });
+        }
+
+        // No tool calls => the model is done; return its text.
+        if (resp.toolCalls.length === 0) {
+          const finalText = resp.content ?? '';
+          this.emit({ type: 'stream_end' });
+          this.emit({ type: 'done', data: { response: finalText } });
+          return finalText;
+        }
+
+        // Record the assistant turn (with its tool calls) in history.
+        convo.push({
+          role: 'assistant',
+          content: resp.content,
+          tool_calls: resp.toolCalls.map(tc => ({
           id: tc.id,
           type: 'function' as const,
           function: {
@@ -217,16 +291,35 @@ export class AgentCoordinator {
       });
 
       // Execute each tool call and append the results (truncated by the manager).
-      for (const tc of resp.toolCalls) {
-        toolsCalled.add(tc.name);
-        this.emit({ type: 'tool_start', data: { tool: tc.name, input: tc.arguments } });
-        const result = await this.executeTool(tc.name, tc.arguments);
-        this.emit({
-          type: 'tool_end',
-          data: { tool: tc.name, input: tc.arguments, result },
-        });
-        const resultText = typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
-        convo.pushToolResult(tc.id, resultText);
+      //
+      // Tool calls the model emits in a single turn are independent by
+      // construction — the model produced them together, before seeing any of
+      // their results, so it cannot be relying on ordering between them. We run
+      // them CONCURRENTLY instead of serially. In the container agent every
+      // call pays a real `docker exec` spawn cost, and multi-call turns
+      // (several reads to map a codebase) are common — parallelizing them is a
+      // pure wall-clock win. Order is preserved in history regardless of
+      // completion order: Promise.all keeps input-index order, and the append
+      // loop below writes results in that order, so the conversation the model
+      // sees on the next round is identical to the old sequential behavior.
+      // Per-tool error isolation is preserved too (executeTool catches and
+      // returns isError results), so one failing call never aborts its siblings.
+      const toolResults = await Promise.all(
+        resp.toolCalls.map(async (tc) => {
+          toolsCalled.add(tc.name);
+          this.emit({ type: 'tool_start', data: { tool: tc.name, input: tc.arguments } });
+          const result = await this.executeTool(tc.name, tc.arguments);
+          this.emit({
+            type: 'tool_end',
+            data: { tool: tc.name, input: tc.arguments, result },
+          });
+          const resultText =
+            typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
+          return { id: tc.id, resultText };
+        }),
+      );
+      for (const { id, resultText } of toolResults) {
+        convo.pushToolResult(id, resultText);
       }
     }
 
@@ -237,11 +330,15 @@ export class AgentCoordinator {
       content:
         'You have reached the tool-call limit. Stop calling tools and give your final answer now based on what you have so far.',
     });
-    const final = await this.chatCompletion(convo.all(), []);
+    const final = await this.chatCompletion(convo.all(), [], undefined, abort.signal);
     const finalText = final.content ?? '';
     this.emit({ type: 'stream_end' });
     this.emit({ type: 'done', data: { response: finalText } });
     return finalText;
+  } finally {
+    this.running = false;
+    this.currentAbort = null;
+  }
   }
 
   /** One non-streaming chat completion against the configured endpoint. */
@@ -250,6 +347,8 @@ export class AgentCoordinator {
     tools: ModelTool[],
     /** Override max_tokens for this call (e.g. larger budget for tool turns). */
     maxTokensOverride?: number,
+    /** External abort signal (from `interrupt()`). Aborting cancels the fetch. */
+    externalSignal?: AbortSignal,
   ): Promise<CompletionResponse> {
     const url = (this.config.baseUrl as string).replace(/\/$/, '') + '/chat/completions';
     const body: Record<string, unknown> = {
@@ -263,12 +362,21 @@ export class AgentCoordinator {
       body.tools = tools;
     }
 
+    // If the caller already aborted before we even started, bail fast.
+    if (externalSignal?.aborted) {
+      throw new DOMException('interrupted', 'AbortError');
+    }
+
     let data: any;
     // Retry transient failures (429 / 5xx / abort-on-timeout) with
     // exponential backoff. A single rate-limit hiccup must not fail an
     // entire terminal-bench task — runs are long and spans are bursty.
     let lastError: Error | null = null;
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      // A user interrupt must NOT be retried — abort immediately.
+      if (externalSignal?.aborted) {
+        throw new DOMException('interrupted', 'AbortError');
+      }
       if (attempt > 0) {
         // 1s, 2s, 4s.
         const backoff = 1000 * Math.pow(2, attempt - 1);
@@ -276,7 +384,17 @@ export class AgentCoordinator {
       }
       try {
         // A fresh AbortController per attempt: reusing one after abort is a no-op.
+        // It's linked to the external signal so a user interrupt aborts the
+        // in-flight fetch too, not just future attempts.
         const attemptController = new AbortController();
+        const onExternalAbort = () => attemptController.abort();
+        if (externalSignal) {
+          if (externalSignal.aborted) {
+            attemptController.abort();
+          } else {
+            externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+          }
+        }
         const attemptTimer = setTimeout(
           () => attemptController.abort(),
           COMPLETION_TIMEOUT_MS,
@@ -294,6 +412,9 @@ export class AgentCoordinator {
           });
         } finally {
           clearTimeout(attemptTimer);
+          if (externalSignal) {
+            externalSignal.removeEventListener('abort', onExternalAbort);
+          }
         }
         if (!resp.ok) {
           const text = await resp.text().catch(() => '');
@@ -308,8 +429,12 @@ export class AgentCoordinator {
         lastError = null;
         break; // success
       } catch (err: any) {
-        // Network error or abort: retry on these too, since they are
-        // typically transient (connection reset, momentary timeout).
+        // A USER-initiated abort must propagate immediately — never retry it.
+        if (externalSignal?.aborted) {
+          throw new DOMException('interrupted', 'AbortError');
+        }
+        // Network error or a timeout-abort: retry, since these are typically
+        // transient (connection reset, momentary timeout).
         const aborted = err?.name === 'AbortError';
         if (aborted || isNetworkError(err)) {
           lastError = err instanceof Error ? err : new Error(String(err));

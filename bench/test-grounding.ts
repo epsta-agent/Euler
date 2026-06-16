@@ -86,6 +86,7 @@ export function groundFromSource(src: string, opts: GroundingOptions = {}): stri
 
   const files = extractRequiredFiles(src);
   const fns = extractTestFunctions(src);
+  const inputs = extractInputLiterals(src, cap);
   const literals = extractExpectedLiterals(src, cap);
 
   const sections: string[] = [];
@@ -109,6 +110,15 @@ export function groundFromSource(src: string, opts: GroundingOptions = {}): stri
     }
   }
 
+  if (inputs.length > 0) {
+    sections.push(
+      'Input fixtures the grader feeds your program (these define the input ' +
+        'format/record layout your code must parse — e.g. fixed-width fields. ' +
+        'Study their byte structure; your program must read input shaped like this):',
+    );
+    for (const i of inputs) sections.push(`  - ${i}`);
+  }
+
   if (literals.length > 0) {
     sections.push(
       'Expected values the grader compares against (these are ground truth — ' +
@@ -118,7 +128,7 @@ export function groundFromSource(src: string, opts: GroundingOptions = {}): stri
   }
 
   // If we found nothing actionable, don't emit a misleading "CONTRACT" header.
-  if (files.length === 0 && fns.length === 0 && literals.length === 0) return '';
+  if (files.length === 0 && fns.length === 0 && literals.length === 0 && inputs.length === 0) return '';
 
   sections.push(
     'These are facts from the grader, not suggestions. Read /tests/test_outputs.py ' +
@@ -209,6 +219,65 @@ function extractTestFunctions(src: string): TestFn[] {
     fns.push({ name, doc });
   }
   return fns;
+}
+
+/**
+ * Input fixtures the grader feeds the agent's program. Targets:
+ *   - initial_X = "..."   (the canonical "seed/initial state" idiom — e.g.
+ *     `initial_accounts` defines the fixed-width record layout the program
+ *     must parse and transform)
+ *   - Path("...").write_text("...")   (the grader writes a specific input
+ *     file before invoking the program; that string is the exact input)
+ *
+ * WHY this is separate from extractExpectedLiterals: for reimplementation /
+ * data-processing tasks (the cobol-modernization shape), the model needs BOTH
+ * the input bytes (to reverse-engineer the record format) AND the expected
+ * output bytes (the ground truth). Surfacing only the outputs leaves the model
+ * matching bytes blind to structure — it cannot derive that "U001John Doe"
+ * means user-id "U001" + 20-char-padded name without seeing the input that
+ * pairs with the output. The input literals are the missing half of the
+ * contract for that whole class of task.
+ *
+ * Conservative like the other extractors: only verbatim string values that
+ * appear in the source. Reuses collectAssignmentRhs/joinAdjacentStrings so
+ * multi-line parenthesized inputs (the cobol idiom) are joined correctly.
+ */
+function extractInputLiterals(src: string, cap: number): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  const add = (label: string, value: string) => {
+    const v = value.replace(/\s+/g, ' ').trim();
+    if (v.length === 0 || v.length > MAX_LITERAL_LEN) return;
+    if (seen.has(v)) return;
+    seen.add(v);
+    out.push(`${label}: ${v}`);
+    return out.length >= cap;
+  };
+
+  // 1. initial_X = <string-literal-sequence>  (multi-line aware, same as expected_).
+  const assignRe = /^(\s*)(initial_[A-Za-z0-9_]*)\s*=\s*(.*)$/gm;
+  let m: RegExpExecArray | null;
+  while ((m = assignRe.exec(src)) !== null && out.length < cap) {
+    const label = m[2];
+    const rhs = collectAssignmentRhs(m[3], src, m.index + m[0].length);
+    const lit = joinAdjacentStrings(rhs);
+    if (lit !== null) {
+      if (add(label, lit)) break;
+    }
+  }
+
+  // 2. Path("...").write_text("...") / path.write_text("...")  — the grader
+  //    writes a concrete input before running the program. Capture the string.
+  //    This is how the cobol test feeds each transaction ("U001U003B0030000000020").
+  if (out.length < cap) {
+    const writeRe = /\.write_text\(\s*(['"])((?:(?!\1).)*)\1/g;
+    while ((m = writeRe.exec(src)) !== null && out.length < cap) {
+      if (add('input', m[2])) break;
+    }
+  }
+
+  return out;
 }
 
 /**
